@@ -1,0 +1,123 @@
+# CryptX Web3 Requirements
+
+This document lists all system prerequisites and project dependencies needed to run the CryptX Web3 project on another device.
+
+## 1. System Requirements
+
+Ensure the following software is installed on your machine:
+
+-   **Node.js**: v18.0.0 or higher (Current LTS recommended)
+-   **npm**: v9.0.0 or higher (comes with Node.js)
+-   **PostgreSQL**: v14 or higher (Database)
+-   **Redis**: v6 or higher (Optional, for caching - set DISABLE_REDIS=true in .env to skip)
+-   **Git**: For version control
+
+## 2. Global Dependencies (Dev)
+
+These tools are recommended for development:
+
+-   `nodemon` (via `npm install -g nodemon`)
+-   `ts-node` (via `npm install -g ts-node`)
+-   `prisma` (via `npm install -g prisma`)
+
+## 3. Project Dependencies
+
+The project uses a monorepo structure managed by Turborepo/npm workspaces.
+
+### Root Dependencies
+-   `concurrently`: ^8.2.2 (Runs multiple commands)
+
+### Frontend (apps/web)
+**Core:**
+-   `next`: 16.1.4 (React Framework)
+-   `react`: ^18.3.1
+-   `react-dom`: ^18.3.1
+-   `typescript`: ^5 (Dev)
+-   `tailwindcss`: ^4 (Dev)
+
+**Web3 & Wallet:**
+-   `ethers`: ^6.16.0
+-   `viem`: ^2.44.4
+-   `@coinbase/wallet-sdk`: ^4.3.7
+-   `@walletconnect/modal`: ^2.7.0
+-   `@walletconnect/sign-client`: ^2.23.4
+-   `siwe`: ^3.0.0 (Sign-In with Ethereum)
+
+**Authentication:**
+-   `@clerk/nextjs`: ^6.36.10
+
+**State Management & Utils:**
+-   `zustand`: ^5.0.10
+-   `axios`: ^1.13.2
+-   `date-fns`: ^2.30.0
+-   `recharts`: ^3.7.0 (Charts)
+
+### Backend (apps/api)
+**Core:**
+-   `express`: ^5.2.1
+-   `typescript`: ^5.9.3 (Dev)
+-   `nodemon`: ^3.1.11 (Dev)
+
+**Database:**
+-   `@prisma/client`: ^5.22.0
+-   `prisma`: ^5.22.0 (Dev)
+-   `ioredis`: ^5.9.2 (Redis Client)
+
+**Web3 & Blockchain:**
+-   `ethers`: ^6.16.0
+-   `siwe`: ^3.0.0
+-   `gate-api`: ^7.2.8 (Exchange integration)
+
+**Security & Utils:**
+-   `@clerk/backend`: ^2.29.5
+-   `bcryptjs`: ^3.0.3
+-   `jsonwebtoken`: ^9.0.3
+-   `cors`: ^2.8.6
+-   `helmet`: ^8.1.0
+-   `dotenv`: ^17.2.3
+-   `cron`: ^4.4.0 (Job scheduling)
+-   `decimal.js-light`: ^2.5.1
+-   `express-rate-limit`: ^8.2.1
+
+## 4. Installation Instructions
+
+1.  **Clone the repository:**
+    ```bash
+    git clone <repository-url>
+    cd Cryptx_web3
+    ```
+
+2.  **Run Setup Script:**
+    This script will install dependencies, create environment files, and set up the database.
+    ```bash
+    ./start.sh setup
+    ```
+
+    *Note: If you are on Windows, use the provided batch file:*
+    ```batch
+    start.bat setup
+    ```
+
+3.  **Manual Setup (Alternative):**
+    If the script doesn't work for you:
+    ```bash
+    # Install dependencies
+    npm install
+
+    # Setup Environment
+    cp apps/api/.env.example apps/api/.env
+    cp apps/web/.env.example apps/web/.env.local
+    # (Update .env files with your credentials)
+
+    # Setup Database
+    cd apps/api
+    npx prisma generate
+    npx prisma migrate dev
+    ```
+
+4.  **Run Development Server:**
+    ```bash
+    ./start.sh
+    # OR
+    npm run dev
+    ```

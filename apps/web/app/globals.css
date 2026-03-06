@@ -1,0 +1,185 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,100..1000;1,9..40,100..1000&display=swap');
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-elevated: var(--surface-elevated);
+  --color-text-primary: var(--text-primary);
+  --color-text-secondary: var(--text-secondary);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-brand-primary: var(--brand-primary);
+  --color-brand-secondary: var(--brand-secondary);
+
+  --color-success: var(--semantic-success);
+  --color-error: var(--semantic-error);
+  --color-warning: var(--semantic-warning);
+  --color-info: var(--semantic-info);
+
+  --font-sans: var(--font-dm-sans), 'DM Sans', sans-serif;
+  --font-mono: var(--font-geist-mono);
+}
+
+:root {
+  /* Dark Crypto Color Palette */
+  --background: #08070E;
+  --surface: rgba(32, 32, 38, 1);
+  --surface-elevated: rgba(40, 40, 48, 1);
+
+  /* Text */
+  --text-primary: #F5F5F5;
+  --text-secondary: #D5D5D5;
+
+  /* Brand */
+  --brand-primary: #00FFB2;
+  --brand-secondary: #00CA8D;
+  --accent: #00FFB2;
+
+  /* Borders */
+  --border: rgba(255, 255, 255, 0.1);
+
+  /* Semantic */
+  --semantic-success: #00FFB2;
+  --semantic-error: #FF4C4C;
+  --semantic-warning: #F59E0B;
+  --semantic-info: #60A5FA;
+
+  /* Spacing */
+  --spacing-1: 8px;
+  --spacing-2: 16px;
+  --spacing-3: 24px;
+  --spacing-4: 32px;
+  --spacing-5: 40px;
+  --spacing-6: 48px;
+  --spacing-8: 64px;
+  --spacing-10: 80px;
+  --spacing-12: 96px;
+
+  /* Typography */
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+  --text-3xl: 48px;
+
+  /* Border Radius */
+  --radius: 8px;
+
+  /* Transitions */
+  --transition: 200ms ease;
+}
+
+* {
+  transition: background-color var(--transition), border-color var(--transition), color var(--transition);
+}
+
+body {
+  background: var(--background);
+  color: var(--text-primary);
+  font-family: 'DM Sans', var(--font-sans), sans-serif;
+  overflow-x: hidden;
+  font-size: var(--text-base);
+  line-height: 1.5;
+}
+
+/* Glass nav utility */
+.glass-nav {
+  backdrop-filter: blur(10px);
+  background: rgba(8, 7, 14, 0.85);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+/* Glow shadow on brand CTAs */
+.shadow-cta {
+  box-shadow: 0 0 34px 0 rgba(42, 240, 124, 0.3);
+}
+
+/* Card glass */
+.card-glass {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+
+/* Scroll bar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 99px;
+}
+
+/* Animations */
+@keyframes float {
+
+  0%,
+  100% {
+    transform: translateY(0px);
+  }
+
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+@keyframes pulse-glow {
+
+  0%,
+  100% {
+    box-shadow: 0 0 10px rgba(0, 255, 178, 0.3);
+  }
+
+  50% {
+    box-shadow: 0 0 25px rgba(0, 255, 178, 0.6);
+  }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s ease-in-out infinite;
+}
+
+/* Ensure WalletConnect modal appears above custom modals */
+wcm-modal,
+w3m-modal,
+[data-walletconnect-modal] {
+  z-index: 99999 !important;
+}
+
+wcm-modal::part(overlay),
+w3m-modal::part(overlay) {
+  z-index: 99998 !important;
+}
+
+/* Input / Select dark style (global convenience) */
+.input-dark {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 8px 12px;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+.input-dark:focus {
+  border-color: var(--brand-primary);
+}
+
+.input-dark option {
+  background: #18181E;
+  color: var(--text-primary);
+}

@@ -1,0 +1,280 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String   @id @default(uuid())
+  mainAddress     String   @unique
+  costBasisMethod String   @default("FIFO") // "FIFO", "LIFO", "WEIGHTED_AVERAGE"
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  wallets          Wallet[]
+  sessions         Session[]
+  exchangeConns    ExchangeConnection[]
+  exchangeAccounts ExchangeAccount[]
+  snapshots        PortfolioSnapshot[]
+  pnlTransactions  PnLTransaction[]
+  holdings         Holding[]
+  realizedPnLs     RealizedPnL[]
+  forecastCaches   ForecastCache[]
+
+  @@index([mainAddress])
+}
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  refreshToken String   @unique
+  deviceInfo   String?
+  ipAddress    String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+
+  @@index([userId])
+  @@index([refreshToken])
+}
+
+model Wallet {
+  id         String   @id @default(uuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  address    String
+  provider   String // "metamask" | "walletconnect"
+  chainTypes String[] // ["ethereum", "polygon", "bsc"]
+  nickname   String?
+  isActive   Boolean  @default(true)
+  createdAt  DateTime @default(now())
+
+  transactions Transaction[]
+
+  @@unique([userId, address])
+  @@index([userId])
+  @@index([address])
+}
+
+model ExchangeConnection {
+  id                 String    @id @default(uuid())
+  userId             String
+  user               User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exchangeName       String // "coindcx"
+  apiKeyEncrypted    String
+  apiSecretEncrypted String
+  isActive           Boolean   @default(true)
+  lastSyncAt         DateTime?
+  createdAt          DateTime  @default(now())
+
+  @@unique([userId, exchangeName])
+  @@index([userId])
+}
+
+model ExchangeAccount {
+  id           String   @id @default(cuid())
+  userId       String
+  provider     String // 'coindcx'
+  apiKey       String // Encrypted
+  apiSecret    String // Encrypted
+  nickname     String?
+  isActive     Boolean  @default(true)
+  lastSyncedAt DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balances ExchangeBalance[]
+  trades   ExchangeTrade[]
+
+  @@unique([userId, provider, apiKey])
+  @@index([userId, isActive])
+}
+
+model ExchangeBalance {
+  id                String   @id @default(cuid())
+  exchangeAccountId String
+  symbol            String // 'BTC', 'ETH', etc.
+  balance           String // Total balance
+  lockedBalance     String // Locked in orders
+  availableBalance  String // Available for trading
+  valueUsd          Float    @default(0)
+  lastUpdated       DateTime @default(now())
+
+  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([exchangeAccountId, symbol])
+  @@index([exchangeAccountId])
+}
+
+model ExchangeTrade {
+  id                String   @id @default(cuid())
+  exchangeAccountId String
+  orderId           String
+  symbol            String // 'BTCUSDT'
+  side              String // 'buy' or 'sell'
+  price             String
+  quantity          String
+  fee               String
+  feeAsset          String
+  timestamp         DateTime
+  createdAt         DateTime @default(now())
+
+  exchangeAccount ExchangeAccount @relation(fields: [exchangeAccountId], references: [id], onDelete: Cascade)
+
+  @@unique([exchangeAccountId, orderId])
+  @@index([exchangeAccountId, timestamp])
+}
+
+model PortfolioSnapshot {
+  id            String   @id @default(uuid())
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  totalValueUsd Float
+  breakdown     Json // { wallets: {...}, exchanges: {...}, assets: [...] }
+  generatedAt   DateTime @default(now())
+
+  @@index([userId, generatedAt])
+}
+
+model PriceCache {
+  id        String   @id @default(uuid())
+  symbol    String   @unique
+  priceUsd  Float
+  updatedAt DateTime @default(now())
+
+  @@index([symbol])
+}
+
+model Transaction {
+  id          String   @id @default(uuid())
+  walletId    String
+  wallet      Wallet   @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  txHash      String   @unique
+  type        String // 'receive', 'send', 'swap', 'contract'
+  asset       String // Token symbol or address
+  amount      Float
+  priceUsd    Float?
+  timestamp   DateTime
+  blockNumber Int?
+  fromAddress String?
+  toAddress   String?
+  chain       String // 'ethereum', 'polygon', 'bsc'
+  createdAt   DateTime @default(now())
+
+  @@index([walletId, timestamp])
+  @@index([txHash])
+  @@index([timestamp])
+}
+
+model TokenPrice {
+  id        String   @id @default(uuid())
+  tokenId   String   @unique // coingecko id (e.g., 'bitcoin', 'ethereum')
+  symbol    String
+  name      String
+  priceUsd  Float
+  change24h Float?
+  marketCap Float?
+  volume24h Float?
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  @@index([tokenId])
+  @@index([symbol])
+  @@index([updatedAt])
+}
+
+// P&L Tracking Models
+
+model PnLTransaction {
+  id            String   @id @default(cuid())
+  userId        String
+  walletAddress String
+  chain         String // e.g., "ethereum", "polygon"
+  tokenSymbol   String // e.g., "ETH", "USDC"
+  txType        String // "buy", "sell", "swap", "transfer", "fee"
+  quantity      Decimal  @db.Decimal(36, 18) // 18 decimal precision
+  priceUsd      Decimal  @db.Decimal(20, 8) // 8 decimal precision for USD
+  feeAmount     Decimal? @db.Decimal(36, 18)
+  feeToken      String?
+  timestamp     DateTime
+  txHash        String
+  source        String // "wallet" or "exchange"
+  createdAt     DateTime @default(now())
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  realizedPnLs RealizedPnL[]
+
+  @@unique([userId, txHash, walletAddress])
+  @@index([userId, tokenSymbol, timestamp])
+  @@index([userId, walletAddress])
+}
+
+model Holding {
+  id              String   @id @default(cuid())
+  userId          String
+  walletAddress   String
+  tokenSymbol     String
+  quantity        Decimal  @db.Decimal(36, 18)
+  costBasisUsd    Decimal  @db.Decimal(20, 8)
+  costBasisMethod String // "FIFO", "LIFO", "WEIGHTED_AVERAGE"
+  lastUpdated     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, walletAddress, tokenSymbol, costBasisMethod])
+  @@index([userId, tokenSymbol])
+}
+
+model RealizedPnL {
+  id                String   @id @default(cuid())
+  userId            String
+  tokenSymbol       String
+  realizedAmountUsd Decimal  @db.Decimal(20, 8)
+  transactionId     String
+  calculatedAt      DateTime @default(now())
+
+  user        User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  transaction PnLTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([userId, tokenSymbol])
+}
+
+// AI Forecasting & Risk Analysis Models
+
+model ForecastCache {
+  id             String   @id @default(cuid())
+  userId         String
+  symbol         String
+  currentPrice   Float
+  forecasts      Json // Array of ForecastResult
+  riskAnalysis   Json // RiskAnalysis object
+  indicators     Json // TechnicalIndicators object
+  historicalData Json // Array of CandlestickData
+  generatedAt    DateTime @default(now())
+  expiresAt      DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, symbol])
+  @@index([symbol])
+  @@index([expiresAt])
+}
+
+model MarketDataCache {
+  id           String   @id @default(cuid())
+  symbol       String   @unique
+  candlesticks Json // Array of CandlestickData
+  fetchedAt    DateTime @default(now())
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([symbol])
+  @@index([expiresAt])
+}

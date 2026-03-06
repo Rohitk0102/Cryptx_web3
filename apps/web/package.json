@@ -1,0 +1,41 @@
+{
+  "name": "web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^6.36.10",
+    "@coinbase/wallet-sdk": "^4.3.7",
+    "@walletconnect/modal": "^2.7.0",
+    "@walletconnect/sign-client": "^2.23.4",
+    "axios": "^1.13.2",
+    "date-fns": "^2.30.0",
+    "ethers": "^6.16.0",
+    "next": "16.1.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^3.7.0",
+    "siwe": "^3.0.0",
+    "viem": "^2.44.4",
+    "zustand": "^5.0.10"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.1.4",
+    "tailwindcss": "^4",
+    "typescript": "^5"
+  },
+  "overrides": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}
