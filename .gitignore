@@ -40,3 +40,4 @@ dump.rdb
 # Logs
 logs/
 *.log
+.kiro/
