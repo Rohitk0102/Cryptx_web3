@@ -1,123 +1,89 @@
-# CryptX Web3 Requirements
+CryptX bootstrap requirements
+=============================
 
-This document lists all system prerequisites and project dependencies needed to run the CryptX Web3 project on another device.
+Note:
+- This repository is a Node.js monorepo. There are no Python or pip dependencies.
+- This file is a machine-setup checklist for running the project on a new device.
 
-## 1. System Requirements
+Minimum software
+----------------
 
-Ensure the following software is installed on your machine:
+Required:
+- Node.js 18+ (Node.js 20 LTS recommended)
+- npm 9+
 
--   **Node.js**: v18.0.0 or higher (Current LTS recommended)
--   **npm**: v9.0.0 or higher (comes with Node.js)
--   **PostgreSQL**: v14 or higher (Database)
--   **Redis**: v6 or higher (Optional, for caching - set DISABLE_REDIS=true in .env to skip)
--   **Git**: For version control
+Recommended for true one-click local setup on Windows:
+- Docker Desktop with `docker compose`
 
-## 2. Global Dependencies (Dev)
+Optional if you do not use Docker Desktop:
+- PostgreSQL 15+ running on `localhost:5432`
+- Redis 7+ running on `localhost:6379`
 
-These tools are recommended for development:
+External keys you still need to provide
+---------------------------------------
 
--   `nodemon` (via `npm install -g nodemon`)
--   `ts-node` (via `npm install -g ts-node`)
--   `prisma` (via `npm install -g prisma`)
+The startup script can create env files automatically, but these values are still project-specific:
+- `apps/web/.env.local`
+  - `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`
+  - `CLERK_SECRET_KEY`
+  - `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID`
+- `apps/api/.env`
+  - `CLERK_SECRET_KEY`
 
-## 3. Project Dependencies
+Optional feature keys:
+- CoinDCX API keys
+- OpenAI / Anthropic / Hugging Face keys
+- CoinMarketCap / Covalent / Moralis / Gate.io keys
 
-The project uses a monorepo structure managed by Turborepo/npm workspaces.
+What `start.bat` does now
+-------------------------
 
-### Root Dependencies
--   `concurrently`: ^8.2.2 (Runs multiple commands)
+When you double-click `start.bat` on Windows, it will:
+1. Check Node.js and npm
+2. Install npm workspace dependencies if `node_modules` is missing
+3. Create `apps/api/.env` from `apps/api/.env.example` if missing
+4. Create `apps/web/.env.local` from `apps/web/.env.example` if missing
+5. Repair `DATABASE_URL` and `REDIS_URL` in `apps/api/.env` to the expected local values
+6. Start PostgreSQL and Redis with Docker Desktop when available
+7. Run `npx prisma generate`
+8. Run `npx prisma migrate deploy`
+9. Fall back to `npx prisma db push` for local bootstrap if deploy fails
+10. Start both backend and frontend with `npm run dev`
 
-### Frontend (apps/web)
-**Core:**
--   `next`: 16.1.4 (React Framework)
--   `react`: ^18.3.1
--   `react-dom`: ^18.3.1
--   `typescript`: ^5 (Dev)
--   `tailwindcss`: ^4 (Dev)
+First run on a new Windows device
+---------------------------------
 
-**Web3 & Wallet:**
--   `ethers`: ^6.16.0
--   `viem`: ^2.44.4
--   `@coinbase/wallet-sdk`: ^4.3.7
--   `@walletconnect/modal`: ^2.7.0
--   `@walletconnect/sign-client`: ^2.23.4
--   `siwe`: ^3.0.0 (Sign-In with Ethereum)
+1. Install Node.js.
+2. Install Docker Desktop and make sure it is running.
+3. Clone the repo.
+4. Double-click `start.bat`.
+5. If this is the first machine setup, fill in the generated env files:
+   - `apps/api/.env`
+   - `apps/web/.env.local`
+6. Double-click `start.bat` again.
 
-**Authentication:**
--   `@clerk/nextjs`: ^6.36.10
+Useful commands
+---------------
 
-**State Management & Utils:**
--   `zustand`: ^5.0.10
--   `axios`: ^1.13.2
--   `date-fns`: ^2.30.0
--   `recharts`: ^3.7.0 (Charts)
+- `start.bat`
+  - Full bootstrap plus app startup
+- `start.bat setup`
+  - Bootstrap only, without starting the dev servers
+- `start.bat check`
+  - Create missing env files if needed, then validate and repair local PostgreSQL and Redis endpoints
+- `start.bat help`
+  - Usage help
 
-### Backend (apps/api)
-**Core:**
--   `express`: ^5.2.1
--   `typescript`: ^5.9.3 (Dev)
--   `nodemon`: ^3.1.11 (Dev)
+Local URLs
+----------
 
-**Database:**
--   `@prisma/client`: ^5.22.0
--   `prisma`: ^5.22.0 (Dev)
--   `ioredis`: ^5.9.2 (Redis Client)
+- Frontend: `http://localhost:3000`
+- Backend: `http://localhost:5000`
+- Backend health check: `http://localhost:5000/health`
 
-**Web3 & Blockchain:**
--   `ethers`: ^6.16.0
--   `siwe`: ^3.0.0
--   `gate-api`: ^7.2.8 (Exchange integration)
+Notes
+-----
 
-**Security & Utils:**
--   `@clerk/backend`: ^2.29.5
--   `bcryptjs`: ^3.0.3
--   `jsonwebtoken`: ^9.0.3
--   `cors`: ^2.8.6
--   `helmet`: ^8.1.0
--   `dotenv`: ^17.2.3
--   `cron`: ^4.4.0 (Job scheduling)
--   `decimal.js-light`: ^2.5.1
--   `express-rate-limit`: ^8.2.1
-
-## 4. Installation Instructions
-
-1.  **Clone the repository:**
-    ```bash
-    git clone <repository-url>
-    cd Cryptx_web3
-    ```
-
-2.  **Run Setup Script:**
-    This script will install dependencies, create environment files, and set up the database.
-    ```bash
-    ./start.sh setup
-    ```
-
-    *Note: If you are on Windows, use the provided batch file:*
-    ```batch
-    start.bat setup
-    ```
-
-3.  **Manual Setup (Alternative):**
-    If the script doesn't work for you:
-    ```bash
-    # Install dependencies
-    npm install
-
-    # Setup Environment
-    cp apps/api/.env.example apps/api/.env
-    cp apps/web/.env.example apps/web/.env.local
-    # (Update .env files with your credentials)
-
-    # Setup Database
-    cd apps/api
-    npx prisma generate
-    npx prisma migrate dev
-    ```
-
-4.  **Run Development Server:**
-    ```bash
-    ./start.sh
-    # OR
-    npm run dev
-    ```
+- The backend `.env.example` now contains safe local-development placeholder secrets so Prisma and the API can boot on a fresh machine.
+- Docker is the simplest path for a new device because it removes the need to install PostgreSQL and Redis manually.
+- Authentication screens still require real Clerk keys from your own project.
