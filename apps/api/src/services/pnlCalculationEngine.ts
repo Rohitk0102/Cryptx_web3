@@ -28,6 +28,7 @@ export interface RealizedPnLResult {
     tokenSymbol: string;
     realizedPnL: Decimal;
     transactionCount: number;
+    hasUnknownCostBasis?: boolean;
   }[];
 }
 
@@ -75,6 +76,178 @@ export class PnLCalculationEngine {
     this.priceService = priceService;
   }
 
+  private async getCostBasisMethod(userId: string): Promise<CostBasisMethodName> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { costBasisMethod: true }
+    });
+
+    return (user?.costBasisMethod || 'FIFO') as CostBasisMethodName;
+  }
+
+  private async refreshHoldings(
+    userId: string,
+    method: CostBasisMethodName,
+    tokenSymbol?: string
+  ): Promise<void> {
+    if (tokenSymbol) {
+      await this.costBasisCalculator.updateHoldings(userId, tokenSymbol, method);
+      return;
+    }
+
+    await this.costBasisCalculator.updateAllHoldings(userId, method);
+  }
+
+  private async computeRealizedPnL(
+    userId: string,
+    options?: {
+      startDate?: Date;
+      endDate?: Date;
+      tokenSymbol?: string;
+    },
+    persist = false
+  ): Promise<RealizedPnLResult> {
+    const method = await this.getCostBasisMethod(userId);
+
+    const whereClause: any = {
+      userId,
+      txType: { in: ['sell', 'swap'] }
+    };
+
+    if (options?.startDate || options?.endDate) {
+      whereClause.timestamp = {};
+      if (options.startDate) {
+        whereClause.timestamp.gte = options.startDate;
+      }
+      if (options.endDate) {
+        whereClause.timestamp.lte = options.endDate;
+      }
+    }
+
+    if (options?.tokenSymbol) {
+      whereClause.tokenSymbol = options.tokenSymbol;
+    }
+
+    const transactions = await this.prisma.pnLTransaction.findMany({
+      where: whereClause,
+      orderBy: { timestamp: 'asc' }
+    });
+
+    const feePairs = transactions
+      .filter(tx => tx.feeToken && tx.feeToken !== tx.tokenSymbol)
+      .map(tx => ({ symbol: tx.feeToken!, ts: tx.timestamp }));
+
+    const feeTokenPriceMap = new Map<string, Decimal>();
+    await Promise.allSettled(
+      feePairs.map(async ({ symbol, ts }) => {
+        const key = `${symbol}:${ts.toISOString()}`;
+        if (!feeTokenPriceMap.has(key)) {
+          const price = await this.priceService.getHistoricalPrice(symbol, ts);
+          if (price) {
+            feeTokenPriceMap.set(key, price);
+          }
+        }
+      })
+    );
+
+    const pnlByToken = new Map<string, { pnl: Decimal; count: number; hasUnknownCostBasis?: boolean }>();
+
+    for (const tx of transactions) {
+      const quantity = new Decimal(tx.quantity.toString());
+      const priceUsd = new Decimal(tx.priceUsd.toString());
+
+      const costBasisPerUnit = await this.costBasisCalculator.getCostBasis(
+        userId,
+        tx.tokenSymbol,
+        quantity,
+        tx.timestamp,
+        method
+      );
+
+      if (costBasisPerUnit === null) {
+        const current = pnlByToken.get(tx.tokenSymbol) || { pnl: new Decimal(0), count: 0 };
+        pnlByToken.set(tx.tokenSymbol, {
+          pnl: current.pnl,
+          count: current.count + 1,
+          hasUnknownCostBasis: true
+        });
+        continue;
+      }
+
+      const proceeds = priceUsd.mul(quantity);
+      const cost = costBasisPerUnit.mul(quantity);
+
+      let feesUsd = new Decimal(0);
+      if (tx.feeAmount && tx.feeToken) {
+        const feeAmount = new Decimal(tx.feeAmount.toString());
+
+        if (tx.feeToken === tx.tokenSymbol) {
+          feesUsd = priceUsd.mul(feeAmount);
+        } else {
+          const feeKey = `${tx.feeToken}:${tx.timestamp.toISOString()}`;
+          const feeTokenPrice = feeTokenPriceMap.get(feeKey) ?? null;
+          if (feeTokenPrice) {
+            feesUsd = feeTokenPrice.mul(feeAmount);
+          }
+        }
+      }
+
+      const realizedPnL = proceeds.minus(cost).minus(feesUsd);
+
+      const current = pnlByToken.get(tx.tokenSymbol) || { pnl: new Decimal(0), count: 0 };
+      pnlByToken.set(tx.tokenSymbol, {
+        pnl: current.pnl.plus(realizedPnL),
+        count: current.count + 1,
+        hasUnknownCostBasis: current.hasUnknownCostBasis
+      });
+
+      if (persist) {
+        const existingRecord = await this.prisma.realizedPnL.findFirst({
+          where: { transactionId: tx.id },
+          select: { id: true }
+        });
+
+        if (existingRecord) {
+          await this.prisma.realizedPnL.update({
+            where: { id: existingRecord.id },
+            data: {
+              userId,
+              tokenSymbol: tx.tokenSymbol,
+              realizedAmountUsd: realizedPnL.toString()
+            }
+          });
+        } else {
+          await this.prisma.realizedPnL.create({
+            data: {
+              userId,
+              tokenSymbol: tx.tokenSymbol,
+              realizedAmountUsd: realizedPnL.toString(),
+              transactionId: tx.id
+            }
+          });
+        }
+      }
+    }
+
+    let totalRealizedPnL = new Decimal(0);
+    const tokenValues = Array.from(pnlByToken.values());
+    for (const { pnl } of tokenValues) {
+      totalRealizedPnL = totalRealizedPnL.plus(pnl);
+    }
+
+    const byToken = Array.from(pnlByToken.entries()).map(([symbol, { pnl, count, hasUnknownCostBasis }]) => ({
+      tokenSymbol: symbol,
+      realizedPnL: pnl,
+      transactionCount: count,
+      ...(hasUnknownCostBasis && { hasUnknownCostBasis: true })
+    }));
+
+    return {
+      totalRealizedPnL,
+      byToken
+    };
+  }
+
   /**
    * Calculate realized P&L for sell and swap transactions
    * 
@@ -97,119 +270,7 @@ export class PnLCalculationEngine {
       tokenSymbol?: string;
     }
   ): Promise<RealizedPnLResult> {
-    // Get user's cost basis method preference
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { costBasisMethod: true }
-    });
-
-    const method = (user?.costBasisMethod || 'FIFO') as CostBasisMethodName;
-
-    // Build query filters
-    const whereClause: any = {
-      userId,
-      txType: { in: ['sell', 'swap'] }
-    };
-
-    if (options?.startDate || options?.endDate) {
-      whereClause.timestamp = {};
-      if (options.startDate) {
-        whereClause.timestamp.gte = options.startDate;
-      }
-      if (options.endDate) {
-        whereClause.timestamp.lte = options.endDate;
-      }
-    }
-
-    if (options?.tokenSymbol) {
-      whereClause.tokenSymbol = options.tokenSymbol;
-    }
-
-    // Get all sell and swap transactions
-    const transactions = await this.prisma.pnLTransaction.findMany({
-      where: whereClause,
-      orderBy: { timestamp: 'asc' }
-    });
-
-    const pnlByToken = new Map<string, { pnl: Decimal; count: number }>();
-
-    for (const tx of transactions) {
-      // Convert Prisma Decimal to decimal.js-light Decimal
-      const quantity = new Decimal(tx.quantity.toString());
-      const priceUsd = new Decimal(tx.priceUsd.toString());
-
-      // Get cost basis for this transaction
-      const costBasisPerUnit = await this.costBasisCalculator.getCostBasis(
-        userId,
-        tx.tokenSymbol,
-        quantity,
-        tx.timestamp,
-        method
-      );
-
-      // Calculate realized P&L using the formula:
-      // (sell_price * quantity) - (cost_basis * quantity) - fees
-      const proceeds = priceUsd.mul(quantity);
-      const cost = costBasisPerUnit.mul(quantity);
-      
-      // Calculate fees in USD
-      let feesUsd = new Decimal(0);
-      if (tx.feeAmount && tx.feeToken) {
-        const feeAmount = new Decimal(tx.feeAmount.toString());
-        
-        // If fee is in the same token, use the transaction price
-        if (tx.feeToken === tx.tokenSymbol) {
-          feesUsd = priceUsd.mul(feeAmount);
-        } else {
-          // Fetch price for the fee token at the transaction timestamp
-          const feeTokenPrice = await this.priceService.getHistoricalPrice(
-            tx.feeToken,
-            tx.timestamp
-          );
-          if (feeTokenPrice) {
-            feesUsd = feeTokenPrice.mul(feeAmount);
-          }
-        }
-      }
-
-      const realizedPnL = proceeds.minus(cost).minus(feesUsd);
-
-      // Accumulate by token
-      const current = pnlByToken.get(tx.tokenSymbol) || { pnl: new Decimal(0), count: 0 };
-      pnlByToken.set(tx.tokenSymbol, {
-        pnl: current.pnl.plus(realizedPnL),
-        count: current.count + 1
-      });
-
-      // Store in database
-      await this.prisma.realizedPnL.create({
-        data: {
-          userId,
-          tokenSymbol: tx.tokenSymbol,
-          realizedAmountUsd: realizedPnL.toString(),
-          transactionId: tx.id
-        }
-      });
-    }
-
-    // Calculate total realized P&L
-    let totalRealizedPnL = new Decimal(0);
-    const tokenValues = Array.from(pnlByToken.values());
-    for (const { pnl } of tokenValues) {
-      totalRealizedPnL = totalRealizedPnL.plus(pnl);
-    }
-
-    // Build result
-    const byToken = Array.from(pnlByToken.entries()).map(([symbol, { pnl, count }]) => ({
-      tokenSymbol: symbol,
-      realizedPnL: pnl,
-      transactionCount: count
-    }));
-
-    return {
-      totalRealizedPnL,
-      byToken
-    };
+    return this.computeRealizedPnL(userId, options, true);
   }
 
   /**
@@ -232,13 +293,9 @@ export class PnLCalculationEngine {
       tokenSymbol?: string;
     }
   ): Promise<UnrealizedPnLResult> {
-    // Get user's cost basis method preference
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { costBasisMethod: true }
-    });
+    const method = await this.getCostBasisMethod(userId);
 
-    const method = (user?.costBasisMethod || 'FIFO') as CostBasisMethodName;
+    await this.refreshHoldings(userId, method, options?.tokenSymbol);
 
     // Get current holdings with non-zero quantity
     const holdings = await this.costBasisCalculator.getHoldings(
@@ -302,6 +359,66 @@ export class PnLCalculationEngine {
   }
 
   /**
+   * Read realized P&L from existing database records without recalculating
+   * 
+   * Retrieves and aggregates existing realized P&L records from the database
+   * to avoid duplicate calculations and database writes.
+   * 
+   * @param userId - User ID
+   * @param options - Optional filters for date range and token
+   * @returns Realized P&L summary from existing records
+   */
+  async getRealizedPnLFromDB(
+    userId: string,
+    options?: {
+      startDate?: Date;
+      endDate?: Date;
+      tokenSymbol?: string;
+    }
+  ): Promise<RealizedPnLResult> {
+    const records = await this.prisma.realizedPnL.findMany({
+      where: {
+        userId,
+        ...(options?.tokenSymbol && { tokenSymbol: options.tokenSymbol }),
+        ...(options?.startDate || options?.endDate ? {
+          calculatedAt: {
+            ...(options.startDate && { gte: options.startDate }),
+            ...(options.endDate && { lte: options.endDate }),
+          }
+        } : {})
+      }
+    });
+
+    // Aggregate by token
+    const pnlByToken = new Map<string, { pnl: Decimal; count: number; hasUnknownCostBasis?: boolean }>();
+    for (const record of records) {
+      const pnl = new Decimal(record.realizedAmountUsd.toString());
+      const current = pnlByToken.get(record.tokenSymbol) || { pnl: new Decimal(0), count: 0 };
+      pnlByToken.set(record.tokenSymbol, {
+        pnl: current.pnl.plus(pnl),
+        count: current.count + 1,
+        hasUnknownCostBasis: current.hasUnknownCostBasis
+      });
+    }
+
+    let total = new Decimal(0);
+    const byToken = Array.from(pnlByToken.entries()).map(([symbol, { pnl, count, hasUnknownCostBasis }]) => {
+      total = total.plus(pnl);
+      return {
+        tokenSymbol: symbol,
+        realizedPnL: pnl,
+        transactionCount: count,
+        ...(hasUnknownCostBasis && { hasUnknownCostBasis: true })
+      };
+    });
+
+    return {
+      totalRealizedPnL: total,
+      byToken
+    };
+  }
+
+  /**
    * Calculate complete P&L summary combining realized and unrealized P&L
    * 
    * Provides a comprehensive view of the user's profit/loss including both
@@ -320,17 +437,10 @@ export class PnLCalculationEngine {
       tokenSymbol?: string;
     }
   ): Promise<PnLSummaryResult> {
-    // Get user's cost basis method
-    const user = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { costBasisMethod: true }
-    });
+    const costBasisMethod = await this.getCostBasisMethod(userId);
 
-    const costBasisMethod = user?.costBasisMethod || 'FIFO';
-
-    // Calculate realized and unrealized P&L
     const [realizedResult, unrealizedResult] = await Promise.all([
-      this.calculateRealizedPnL(userId, options),
+      this.computeRealizedPnL(userId, options, false),
       this.calculateUnrealizedPnL(userId, { tokenSymbol: options?.tokenSymbol })
     ]);
 

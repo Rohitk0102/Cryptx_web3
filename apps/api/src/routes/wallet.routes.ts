@@ -20,6 +20,10 @@ router.get('/:id/balances', getWalletBalances);
 // Debug endpoint to check wallet status
 router.get('/:id/debug', async (req: any, res: any) => {
     try {
+        if (process.env.NODE_ENV !== 'development') {
+            return res.status(404).json({ error: 'Not found' });
+        }
+
         const { id } = req.params;
         const userId = req.userId;
         

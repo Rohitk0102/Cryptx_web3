@@ -134,7 +134,7 @@ export default function TokenDetailPage() {
                                     key={range.value}
                                     onClick={() => setTimeRange(range.value as TimeRange)}
                                     className={`px-4 py-2 rounded-[2px] text-sm font-medium transition ${timeRange === range.value
-                                            ? 'bg-accent text-white'
+                                            ? 'border border-[#00FFB2]/35 bg-[#00FFB2]/12 text-[#D8FFF2] shadow-[0_0_16px_rgba(0,255,178,0.08)]'
                                             : 'bg-surface text-text-secondary hover:bg-surface-elevated border border-border'
                                         }`}
                                 >

@@ -29,11 +29,14 @@ export function validateChain(chain: string): ValidationResult {
 
     const config = SUPPORTED_CHAINS[chain];
 
-    // Validate RPC URL
-    if (!config.rpcUrl) {
-        errors.push(`RPC URL not configured for ${chain}`);
-    } else if (!isValidUrl(config.rpcUrl)) {
-        errors.push(`Invalid RPC URL format for ${chain}: ${config.rpcUrl}`);
+    // Validate RPC URLs
+    if (!config.rpcUrls || config.rpcUrls.length === 0) {
+        errors.push(`RPC URLs not configured for ${chain}`);
+    } else {
+        const invalidRpcUrls = config.rpcUrls.filter((rpcUrl) => !isValidUrl(rpcUrl));
+        if (invalidRpcUrls.length > 0) {
+            errors.push(`Invalid RPC URL format for ${chain}: ${invalidRpcUrls.join(', ')}`);
+        }
     }
 
     // Validate chain ID
@@ -238,7 +241,7 @@ export function getSupportedChainsInfo() {
         name: config.name,
         chainId: config.chainId,
         nativeCurrency: config.nativeCurrency,
-        rpcUrl: config.rpcUrl.replace(/\/[^\/]+$/, '/***'), // Hide API keys
+        rpcUrls: config.rpcUrls.map((rpcUrl) => rpcUrl.replace(/\/[^\/]+$/, '/***')),
     }));
 }
 
@@ -252,10 +255,19 @@ export async function checkChainHealth(chain: string): Promise<{
 }> {
     try {
         const config = getValidatedChainConfig(chain);
+        const rpcUrl = config.rpcUrls[0];
+
+        if (!rpcUrl) {
+            return {
+                isHealthy: false,
+                error: `No RPC URL configured for ${chain}`,
+            };
+        }
+
         const startTime = Date.now();
         
         // Simple health check - try to get latest block number
-        const response = await fetch(config.rpcUrl, {
+        const response = await fetch(rpcUrl, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

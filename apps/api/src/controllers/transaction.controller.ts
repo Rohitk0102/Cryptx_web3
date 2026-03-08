@@ -23,7 +23,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
 
         // Validate pagination parameters
         if (page < 1 || limit < 1 || limit > 100) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: 'Invalid pagination parameters',
                 details: 'Page must be >= 1, limit must be between 1 and 100'
             });
@@ -32,14 +32,14 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
         // Validate sort parameters
         const validSortFields = ['timestamp', 'priceUsd', 'quantity'];
         if (!validSortFields.includes(sortBy)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: 'Invalid sort field',
                 details: `sortBy must be one of: ${validSortFields.join(', ')}`
             });
         }
 
         if (!['asc', 'desc'].includes(sortOrder)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: 'Invalid sort order',
                 details: 'sortOrder must be "asc" or "desc"'
             });
@@ -48,7 +48,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
         // Validate transaction type if provided
         const validTxTypes = ['buy', 'sell', 'swap', 'transfer', 'fee'];
         if (txType && !validTxTypes.includes(txType)) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: 'Invalid transaction type',
                 details: `txType must be one of: ${validTxTypes.join(', ')}`
             });
@@ -63,7 +63,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
             if (startDate) {
                 const start = new Date(startDate);
                 if (isNaN(start.getTime())) {
-                    return res.status(400).json({ 
+                    return res.status(400).json({
                         error: 'Invalid startDate format',
                         details: 'startDate must be a valid ISO 8601 date string'
                     });
@@ -73,7 +73,7 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
             if (endDate) {
                 const end = new Date(endDate);
                 if (isNaN(end.getTime())) {
-                    return res.status(400).json({ 
+                    return res.status(400).json({
                         error: 'Invalid endDate format',
                         details: 'endDate must be a valid ISO 8601 date string'
                     });
@@ -104,8 +104,10 @@ export const getTransactions = async (req: AuthRequest, res: Response) => {
         const orderBy: any = {};
         orderBy[sortBy] = sortOrder;
 
-        // Fetch transactions with pagination
-        const [transactions, total] = await Promise.all([
+        // Fetch transactions with pagination inside a read transaction for consistency.
+        // Without this, an insert between the count and findMany calls could make
+        // `total` disagree with the returned page, breaking frontend pagination.
+        const [transactions, total] = await prisma.$transaction([
             prisma.pnLTransaction.findMany({
                 where,
                 orderBy,

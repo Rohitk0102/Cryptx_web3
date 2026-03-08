@@ -31,6 +31,34 @@ export interface WalletConnection {
     coinbaseProvider?: any;
 }
 
+type WalletError = Error & {
+    code?: number | string;
+    cause?: unknown;
+};
+
+function toWalletError(error: unknown, prefix: string): WalletError {
+    if (error instanceof Error) {
+        const walletError = error as WalletError;
+        if (!walletError.message.startsWith(prefix)) {
+            walletError.message = `${prefix}: ${walletError.message}`;
+        }
+        return walletError;
+    }
+
+    const message = typeof error === 'string' && error ? error : 'Unknown error';
+    const wrappedError = new Error(`${prefix}: ${message}`) as WalletError;
+    wrappedError.cause = error;
+
+    if (typeof error === 'object' && error !== null && 'code' in error) {
+        const code = (error as { code?: unknown }).code;
+        if (typeof code === 'number' || typeof code === 'string') {
+            wrappedError.code = code;
+        }
+    }
+
+    return wrappedError;
+}
+
 /**
  * Connect to Coinbase Wallet
  */
@@ -49,8 +77,8 @@ export async function connectCoinbase(): Promise<WalletConnection> {
             providerType: 'coinbase',
             coinbaseProvider: cbConnection.coinbaseProvider,
         };
-    } catch (error) {
-        throw new Error(`Coinbase Wallet connection failed: ${error}`);
+    } catch (error: unknown) {
+        throw toWalletError(error, 'Coinbase Wallet connection failed');
     }
 }
 
@@ -75,8 +103,8 @@ export async function connectWalletConnectProvider(): Promise<WalletConnection> 
                 session: wcConnection.session,
             },
         };
-    } catch (error) {
-        throw new Error(`WalletConnect connection failed: ${error}`);
+    } catch (error: unknown) {
+        throw toWalletError(error, 'WalletConnect connection failed');
     }
 }
 
@@ -106,11 +134,19 @@ export async function connectWallet(): Promise<WalletConnection> {
     if (isWalletConnectAvailable()) {
         try {
             return await connectWalletConnectProvider();
-        } catch (wcError) {
-            // If WalletConnect fails and we had a MetaMask error (installation missing), 
+        } catch (wcError: any) {
+            // If WalletConnect fails and we had a MetaMask error (installation missing),
             // prefer the MetaMask error so the UI shows the download link.
             if (metaMaskError && metaMaskError.code === 'METAMASK_NOT_INSTALLED') {
                 throw metaMaskError;
+            }
+            // Both providers failed for non-installation reasons — surface both messages
+            // so developers and users can see exactly what went wrong on each side.
+            if (metaMaskError) {
+                throw new Error(
+                    `All wallet providers failed. MetaMask: ${metaMaskError.message}. ` +
+                    `WalletConnect: ${wcError.message}`
+                );
             }
             throw wcError;
         }
@@ -265,10 +301,24 @@ export async function getTokenBalance(
     tokenAddress: string,
     walletAddress: string
 ): Promise<string> {
-    const abi = ['function balanceOf(address) view returns (uint256)'];
+    const abi = [
+        'function balanceOf(address) view returns (uint256)',
+        'function decimals() view returns (uint8)',
+    ];
     const contract = new ethers.Contract(tokenAddress, abi, provider);
+
     const balance = await contract.balanceOf(walletAddress);
-    return ethers.formatEther(balance);
+
+    // Fetch decimals dynamically — USDC=6, WBTC=8, most tokens=18
+    // Fallback to 18 if the contract doesn't expose decimals() (non-standard ERC-20)
+    let decimals = 18;
+    try {
+        decimals = await contract.decimals();
+    } catch {
+        decimals = 18;
+    }
+
+    return ethers.formatUnits(balance, decimals);
 }
 
 /**

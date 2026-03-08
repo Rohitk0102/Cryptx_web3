@@ -1,12 +1,17 @@
 import { ethers } from 'ethers';
 import redis from '../utils/redis';
 import { discoverTokens, getTokenAddressesForChain } from './tokenDiscovery.service';
-import { createRetryableProvider, RpcCircuitBreaker } from '../utils/rpcRetry';
+import {
+    createRetryableProvider,
+    isRpcEndpointError,
+    RetryableRpcProvider,
+    RpcCircuitBreaker,
+} from '../utils/rpcRetry';
 
 export interface ChainConfig {
     chainId: number;
     name: string;
-    rpcUrl: string;
+    rpcUrls: string[];
     nativeCurrency: {
         name: string;
         symbol: string;
@@ -14,11 +19,74 @@ export interface ChainConfig {
     };
 }
 
+const DEFAULT_RPC_URLS: Record<string, string[]> = {
+    ethereum: [
+        'https://eth.llamarpc.com',
+        'https://ethereum-rpc.publicnode.com',
+    ],
+    polygon: [
+        'https://polygon-bor-rpc.publicnode.com',
+        'https://polygon.llamarpc.com',
+        'https://1rpc.io/matic',
+    ],
+    bsc: [
+        'https://bsc-dataseed.binance.org',
+        'https://bsc-rpc.publicnode.com',
+    ],
+};
+
+function isValidRpcUrl(url?: string): url is string {
+    if (!url) {
+        return false;
+    }
+
+    const normalized = url.trim();
+    if (!normalized) {
+        return false;
+    }
+
+    const lower = normalized.toLowerCase();
+    if (
+        lower.includes('undefined') ||
+        lower.includes('your-') ||
+        lower.includes('your_') ||
+        lower.includes('<your') ||
+        lower.includes('replace-me')
+    ) {
+        return false;
+    }
+
+    try {
+        const parsed = new URL(normalized);
+        return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+    } catch {
+        return false;
+    }
+}
+
+function resolveRpcUrls(envValue: string | undefined, fallbacks: string[]): string[] {
+    const configuredUrls = (envValue || '')
+        .split(',')
+        .map((value) => value.trim())
+        .filter(isValidRpcUrl);
+
+    return Array.from(new Set([...configuredUrls, ...fallbacks.filter(isValidRpcUrl)]));
+}
+
+function maskRpcUrl(url: string): string {
+    try {
+        const parsed = new URL(url);
+        return `${parsed.origin}/***`;
+    } catch {
+        return url.replace(/\/[^\/]+$/, '/***');
+    }
+}
+
 export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     ethereum: {
         chainId: 1,
         name: 'Ethereum',
-        rpcUrl: process.env.ETH_RPC_URL || 'https://eth.llamarpc.com',
+        rpcUrls: resolveRpcUrls(process.env.ETH_RPC_URL, DEFAULT_RPC_URLS.ethereum),
         nativeCurrency: {
             name: 'Ether',
             symbol: 'ETH',
@@ -28,7 +96,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     polygon: {
         chainId: 137,
         name: 'Polygon',
-        rpcUrl: process.env.POLYGON_RPC_URL || 'https://polygon-rpc.com',
+        rpcUrls: resolveRpcUrls(process.env.POLYGON_RPC_URL, DEFAULT_RPC_URLS.polygon),
         nativeCurrency: {
             name: 'MATIC',
             symbol: 'MATIC',
@@ -38,7 +106,7 @@ export const SUPPORTED_CHAINS: Record<string, ChainConfig> = {
     bsc: {
         chainId: 56,
         name: 'BSC',
-        rpcUrl: process.env.BSC_RPC_URL || 'https://bsc-dataseed.binance.org',
+        rpcUrls: resolveRpcUrls(process.env.BSC_RPC_URL, DEFAULT_RPC_URLS.bsc),
         nativeCurrency: {
             name: 'BNB',
             symbol: 'BNB',
@@ -54,8 +122,9 @@ const circuitBreakers: Record<string, RpcCircuitBreaker> = {
     bsc: new RpcCircuitBreaker(5, 60000, 300000),
 };
 
-// Retryable providers cache
-const retryableProviders: Record<string, any> = {};
+// Retryable providers cache - initialized lazily
+const retryableProviders: Record<string, RetryableRpcProvider[]> = {};
+const activeProviderIndexes: Record<string, number> = {};
 
 export interface TokenBalance {
     symbol: string;
@@ -74,30 +143,93 @@ export interface ChainBalance {
     totalValueUsd: number;
 }
 
-/**
- * Get retryable provider for specific chain
- */
-export function getProvider(chain: string): any {
+function getProviders(chain: string): RetryableRpcProvider[] {
     const config = SUPPORTED_CHAINS[chain];
     if (!config) {
         throw new Error(`Unsupported chain: ${chain}`);
     }
 
-    // Create and cache retryable provider
+    if (!config.rpcUrls.length) {
+        throw new Error(`No valid RPC URLs configured for ${chain}`);
+    }
+
     if (!retryableProviders[chain]) {
-        retryableProviders[chain] = createRetryableProvider(
-            config.rpcUrl,
-            config.name,
-            {
-                maxRetries: 3,
-                baseDelay: 1000,
-                maxDelay: 10000,
-                backoffMultiplier: 2,
-            }
+        console.log(
+            `Creating ${config.rpcUrls.length} RPC provider(s) for ${chain}: ${config.rpcUrls.map(maskRpcUrl).join(', ')}`
         );
+        retryableProviders[chain] = config.rpcUrls.map((rpcUrl) =>
+            createRetryableProvider(
+                rpcUrl,
+                config.name,
+                config.chainId,
+                {
+                    maxRetries: 3,
+                    baseDelay: 1000,
+                    maxDelay: 10000,
+                    backoffMultiplier: 2,
+                }
+            )
+        );
+        activeProviderIndexes[chain] = 0;
     }
 
     return retryableProviders[chain];
+}
+
+function getOrderedProviders(chain: string): Array<{ provider: RetryableRpcProvider; index: number }> {
+    const providers = getProviders(chain);
+    const activeIndex = activeProviderIndexes[chain] ?? 0;
+
+    return Array.from({ length: providers.length }, (_, offset) => {
+        const index = (activeIndex + offset) % providers.length;
+        return { provider: providers[index], index };
+    });
+}
+
+async function executeWithProviderFailover<T>(
+    chain: string,
+    operationName: string,
+    operation: (provider: RetryableRpcProvider) => Promise<T>
+): Promise<T> {
+    const orderedProviders = getOrderedProviders(chain);
+    let lastError: any;
+
+    for (let attempt = 0; attempt < orderedProviders.length; attempt++) {
+        const { provider, index } = orderedProviders[attempt];
+
+        try {
+            const result = await getCircuitBreaker(chain).execute(() => operation(provider));
+            activeProviderIndexes[chain] = index;
+            return result;
+        } catch (error: any) {
+            lastError = error;
+            const hasFallbackProvider = attempt < orderedProviders.length - 1;
+
+            if (!hasFallbackProvider || !isRpcEndpointError(error)) {
+                throw error;
+            }
+
+            console.warn(
+                `RPC failover for ${chain} during ${operationName}: ${maskRpcUrl(provider.getRpcUrl())} failed with ${error?.message || 'unknown error'}`
+            );
+        }
+    }
+
+    throw lastError;
+}
+
+/**
+ * Get retryable provider for specific chain
+ */
+export function getProvider(chain: string): RetryableRpcProvider {
+    const config = SUPPORTED_CHAINS[chain];
+    if (!config) {
+        throw new Error(`Unsupported chain: ${chain}`);
+    }
+
+    const providers = getProviders(chain);
+    const activeIndex = activeProviderIndexes[chain] ?? 0;
+    return providers[activeIndex];
 }
 
 /**
@@ -118,13 +250,13 @@ export async function getNativeBalance(
     chain: string,
     address: string
 ): Promise<TokenBalance> {
-    const provider = getProvider(chain);
     const config = SUPPORTED_CHAINS[chain];
-    const circuitBreaker = getCircuitBreaker(chain);
 
     try {
-        const balance = await circuitBreaker.execute(() =>
-            provider.getBalance(address)
+        const balance = await executeWithProviderFailover(
+            chain,
+            'getBalance',
+            (provider) => provider.getBalance(address)
         ) as bigint;
         const balanceFormatted = ethers.formatEther(balance);
 
@@ -148,9 +280,6 @@ export async function getTokenBalance(
     tokenAddress: string,
     walletAddress: string
 ): Promise<TokenBalance | null> {
-    const provider = getProvider(chain);
-    const circuitBreaker = getCircuitBreaker(chain);
-
     const abi = [
         'function balanceOf(address) view returns (uint256)',
         'function decimals() view returns (uint8)',
@@ -159,13 +288,19 @@ export async function getTokenBalance(
     ];
 
     try {
-        const contract = new ethers.Contract(tokenAddress, abi, provider.getProvider());
-
         const [balance, decimals, symbol, name] = await Promise.all([
-            circuitBreaker.execute(() => contract.balanceOf(walletAddress)) as Promise<bigint>,
-            circuitBreaker.execute(() => contract.decimals()) as Promise<number>,
-            circuitBreaker.execute(() => contract.symbol()) as Promise<string>,
-            circuitBreaker.execute(() => contract.name()) as Promise<string>,
+            executeWithProviderFailover(chain, 'erc20.balanceOf', (provider) =>
+                new ethers.Contract(tokenAddress, abi, provider.getProvider()).balanceOf(walletAddress)
+            ) as Promise<bigint>,
+            executeWithProviderFailover(chain, 'erc20.decimals', (provider) =>
+                new ethers.Contract(tokenAddress, abi, provider.getProvider()).decimals()
+            ) as Promise<number>,
+            executeWithProviderFailover(chain, 'erc20.symbol', (provider) =>
+                new ethers.Contract(tokenAddress, abi, provider.getProvider()).symbol()
+            ) as Promise<string>,
+            executeWithProviderFailover(chain, 'erc20.name', (provider) =>
+                new ethers.Contract(tokenAddress, abi, provider.getProvider()).name()
+            ) as Promise<string>,
         ]);
 
         const balanceFormatted = ethers.formatUnits(balance, decimals);
@@ -197,21 +332,36 @@ export async function getChainBalances(
     tokenAddresses?: string[]
 ): Promise<ChainBalance> {
     const config = SUPPORTED_CHAINS[chain];
+    if (!config) {
+        throw new Error(`Unsupported chain: ${chain}`);
+    }
 
     // Get native balance
     const nativeBalance = await getNativeBalance(chain, address);
 
     // Get token addresses from discovery or use provided ones
-    const addressesToCheck = tokenAddresses || await getTokenAddressesForChain(chain, address);
-    
-    // Get token balances
-    const tokens: TokenBalance[] = [];
-    for (const tokenAddress of addressesToCheck) {
-        const balance = await getTokenBalance(chain, tokenAddress, address);
-        if (balance) {
-            tokens.push(balance);
+    let addressesToCheck = tokenAddresses;
+    if (!addressesToCheck) {
+        try {
+            addressesToCheck = await getTokenAddressesForChain(chain, address);
+        } catch (error) {
+            console.error(`Token discovery failed for ${chain}, falling back to common tokens:`, error);
+            addressesToCheck = COMMON_TOKENS[chain] || [];
         }
     }
+
+    const uniqueTokenAddresses = Array.from(new Set(addressesToCheck));
+
+    // Get token balances in parallel
+    const results = await Promise.allSettled(
+        uniqueTokenAddresses.map((tokenAddress) => getTokenBalance(chain, tokenAddress, address))
+    );
+    const tokens: TokenBalance[] = results
+        .filter(
+            (r): r is PromiseFulfilledResult<TokenBalance> =>
+                r.status === 'fulfilled' && r.value !== null
+        )
+        .map((r) => r.value);
 
     return {
         chain: config.name,
@@ -229,21 +379,58 @@ export async function getMultiChainBalances(
     address: string,
     chains: string[] = ['ethereum', 'polygon', 'bsc']
 ): Promise<ChainBalance[]> {
-    const cacheKey = `balances:${address}`;
+    const requestedChains = Array.from(new Set(chains.filter(Boolean)));
+    const supportedChains = requestedChains.filter((chain) => SUPPORTED_CHAINS[chain]);
 
-    // Check cache
-    const cached = await redis.get(cacheKey);
-    if (cached) {
-        return JSON.parse(cached);
+    if (supportedChains.length === 0) {
+        return [];
+    }
+
+    const cacheKey = `balances:${address}:${[...supportedChains].sort().join(',')}`;
+
+    // Check cache — Redis failures must never crash this function
+    try {
+        const cached = await redis.get(cacheKey);
+        if (cached) {
+            return JSON.parse(cached);
+        }
+    } catch (error) {
+        console.warn('[Cache] redis.get() failed, fetching live data:', error);
     }
 
     // Fetch balances in parallel
-    const balances = await Promise.all(
-        chains.map((chain) => getChainBalances(chain, address))
+    const results = await Promise.allSettled(
+        supportedChains.map((chain) => getChainBalances(chain, address))
     );
+    const balances: ChainBalance[] = [];
+    const failedChains: string[] = [];
 
-    // Cache for 5 minutes
-    await redis.setex(cacheKey, 300, JSON.stringify(balances));
+    results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+            balances.push(result.value);
+            return;
+        }
+
+        failedChains.push(supportedChains[index]);
+        console.error(`Failed to fetch balances on ${supportedChains[index]}:`, result.reason);
+    });
+
+    if (failedChains.length > 0) {
+        console.warn(
+            `Balance fetch returned partial data for ${address}. Failed chains: ${failedChains.join(', ')}`
+        );
+    }
+
+    if (balances.length === 0) {
+        throw new Error(`Failed to fetch balances on all requested chains: ${failedChains.join(', ')}`);
+    }
+
+    // Cache for 5 minutes — failure is non-fatal
+    try {
+        await redis.setex(cacheKey, 300, JSON.stringify(balances));
+    } catch (error) {
+        console.warn('[Cache] redis.setex() failed, continuing without cache:', error);
+    }
 
     return balances;
 }

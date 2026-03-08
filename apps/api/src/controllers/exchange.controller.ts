@@ -99,9 +99,10 @@ export const connectExchange = async (req: AuthRequest, res: Response) => {
     
     // Handle specific error cases
     if (error.message === 'Invalid API credentials') {
-      return res.status(401).json({ 
+      return res.status(400).json({
         error: 'Invalid API credentials',
-        details: 'The provided API key and secret could not be validated with CoinDCX'
+        details: 'The provided API key and secret could not be validated with CoinDCX',
+        code: 'INVALID_EXCHANGE_CREDENTIALS',
       });
     }
 
@@ -400,20 +401,21 @@ export const syncTradeHistory = async (req: AuthRequest, res: Response) => {
     }
 
     // Sync trade history
-    await exchangeService.syncTradeHistory(accountId, options);
-
-    // Get trade count for response
-    // @ts-ignore - Prisma types will be available after regeneration
-    const tradeCount = await prisma.exchangeTrade.count({
-      where: { exchangeAccountId: accountId },
-    });
+    const result = await exchangeService.syncTradeHistory(accountId, options);
 
     console.log('✅ Trade history synced successfully');
 
     res.json({ 
       success: true,
-      message: 'Trade history synced successfully',
-      tradeCount,
+      message: result.diagnostics?.emptyTradeHistory
+        ? 'CoinDCX trade history returned no trades for this API key'
+        : 'Trade history synced successfully',
+      tradeCount: result.totalTrades,
+      newTradesCount: result.newTradesCount,
+      warning: result.diagnostics?.emptyTradeHistory
+        ? `${result.diagnostics.likelyCause} ${result.diagnostics.recommendation}`
+        : undefined,
+      diagnostics: result.diagnostics,
       lastSyncedAt: new Date(),
     });
   } catch (error: any) {

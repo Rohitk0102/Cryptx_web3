@@ -135,10 +135,15 @@ export async function connectWalletConnect(): Promise<WalletConnectConnection> {
         // Ensure address is checksummed (EIP-55 compliant)
         const checksummedAddress = ethers.getAddress(address);
 
-        // Create ethers provider
-        const provider = new ethers.JsonRpcProvider(
-            `https://eth-mainnet.g.alchemy.com/v2/${process.env.NEXT_PUBLIC_ALCHEMY_API_KEY}`
-        );
+        // Create ethers provider with fallback
+        const alchemyKey = process.env.NEXT_PUBLIC_ALCHEMY_API_KEY;
+        const rpcUrl = alchemyKey && alchemyKey !== 'undefined' && !alchemyKey.includes('YOUR')
+            ? `https://eth-mainnet.g.alchemy.com/v2/${alchemyKey}`
+            : 'https://eth.llamarpc.com';
+        const provider = new ethers.JsonRpcProvider(rpcUrl, undefined, {
+            staticNetwork: true,
+            polling: false
+        });
 
         return {
             provider,

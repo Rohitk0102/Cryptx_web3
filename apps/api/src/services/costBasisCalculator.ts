@@ -37,7 +37,7 @@ export class CostBasisCalculator {
    * @param sellQuantity - Quantity being sold
    * @param sellTimestamp - Timestamp of the sell transaction
    * @param method - Cost basis method to use ("FIFO", "LIFO", "WEIGHTED_AVERAGE")
-   * @returns Average cost basis per unit for the sold quantity
+   * @returns Average cost basis per unit for the sold quantity, or null if no purchase history
    * 
    * Requirements: 4.1, 4.2, 4.3
    */
@@ -47,7 +47,7 @@ export class CostBasisCalculator {
     sellQuantity: Decimal,
     sellTimestamp: Date,
     method: CostBasisMethodName
-  ): Promise<Decimal> {
+  ): Promise<Decimal | null> {
     // Get all buy and swap transactions before this sell
     // Exclude transfers as they don't affect cost basis (Requirement 4.2)
     const transactions = await this.prisma.pnLTransaction.findMany({
@@ -71,10 +71,9 @@ export class CostBasisCalculator {
     // Handle edge case: no purchases found
     if (purchases.length === 0) {
       console.warn(
-        `No purchase history found for ${tokenSymbol} before ${sellTimestamp.toISOString()}. ` +
-        `Using zero cost basis.`
+        `No purchase history for ${tokenSymbol} — cost basis unknown`
       );
-      return new Decimal(0);
+      return null;
     }
 
     // Apply cost basis method (Requirement 4.3)
@@ -227,6 +226,7 @@ export class CostBasisCalculator {
     return this.prisma.holding.findMany({
       where: {
         userId,
+        walletAddress: 'aggregated',
         costBasisMethod: method,
         tokenSymbol: tokenSymbol,
         quantity: { gt: 0 }

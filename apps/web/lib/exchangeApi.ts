@@ -50,6 +50,22 @@ export interface SyncTradeHistoryParams {
   maxBatches?: number;
 }
 
+export interface TradeHistoryDiagnostics {
+  emptyTradeHistory: boolean;
+  userInfo?: {
+    coindcxId?: string;
+    email?: string;
+  };
+  probes: Array<{
+    label: string;
+    count?: number;
+    error?: string;
+  }>;
+  likelyCause: string;
+  recommendation: string;
+  docHint: string;
+}
+
 export interface GetTradeHistoryParams {
   page?: number;
   limit?: number;
@@ -89,7 +105,14 @@ export const exchangeApi = {
   syncTradeHistory: async (
     accountId: string,
     params?: SyncTradeHistoryParams
-  ): Promise<{ success: boolean; tradeCount: number; lastSyncedAt: string }> => {
+  ): Promise<{
+    success: boolean;
+    tradeCount: number;
+    newTradesCount?: number;
+    warning?: string;
+    diagnostics?: TradeHistoryDiagnostics;
+    lastSyncedAt: string;
+  }> => {
     const { data } = await apiClient.post(
       `/exchange/accounts/${accountId}/sync-trades`,
       null,

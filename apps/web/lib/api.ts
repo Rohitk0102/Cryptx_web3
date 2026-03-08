@@ -1,6 +1,5 @@
 import axios from 'axios';
-
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001/api';
+import { API_BASE_URL } from './apiConfig';
 
 // Debug: Log the API base URL
 if (typeof window !== 'undefined') {
@@ -27,12 +26,47 @@ export const clearClerkAuth = () => {
     clerkToken = null;
     clerkUserId = null;
     getClerkTokenFn = null;
-    
+
     // Clear any cached data on logout
     if (typeof window !== 'undefined') {
         // Dispatch a custom event to notify components to clear their caches
         window.dispatchEvent(new CustomEvent('auth-cleared'));
     }
+};
+
+export const getAuthHeaders = async (): Promise<Record<string, string>> => {
+    const headers: Record<string, string> = {};
+
+    if (getClerkTokenFn && clerkUserId) {
+        try {
+            const freshToken = await getClerkTokenFn();
+            if (freshToken) {
+                headers.Authorization = `Bearer ${freshToken}`;
+                headers['X-Clerk-User-Id'] = clerkUserId;
+                return headers;
+            }
+        } catch (error) {
+            console.error('Failed to get fresh Clerk token for stream:', error);
+        }
+    }
+
+    if (clerkToken) {
+        headers.Authorization = `Bearer ${clerkToken}`;
+        if (clerkUserId) {
+            headers['X-Clerk-User-Id'] = clerkUserId;
+        }
+        return headers;
+    }
+
+    if (typeof window !== 'undefined') {
+        const token = localStorage.getItem('accessToken');
+        if (token) {
+            headers.Authorization = `Bearer ${token}`;
+            return headers;
+        }
+    }
+
+    return headers;
 };
 
 const apiClient = axios.create({
@@ -57,7 +91,7 @@ apiClient.interceptors.request.use(async (config) => {
             console.error('Failed to get fresh Clerk token:', e);
         }
     }
-    
+
     // Fallback to cached Clerk token if available
     if (clerkToken) {
         config.headers.Authorization = `Bearer ${clerkToken}`;
@@ -66,7 +100,7 @@ apiClient.interceptors.request.use(async (config) => {
         }
         return config;
     }
-    
+
     // Fallback to legacy localStorage token
     if (typeof window !== 'undefined') {
         const token = localStorage.getItem('accessToken');
@@ -75,7 +109,7 @@ apiClient.interceptors.request.use(async (config) => {
             return config;
         }
     }
-    
+
     // If we reach here, no authentication is available
     console.warn('⚠️  No authentication token available for API request');
     return config;
@@ -100,6 +134,11 @@ apiClient.interceptors.response.use(
             }
 
             try {
+                // All localStorage access must be guarded for Next.js SSR safety
+                if (typeof window === 'undefined') {
+                    return Promise.reject(error);
+                }
+
                 const refreshToken = localStorage.getItem('refreshToken');
                 if (!refreshToken) {
                     console.warn('⚠️  No refresh token available - user needs to login');
@@ -121,13 +160,16 @@ apiClient.interceptors.response.use(
             } catch (refreshError) {
                 // Refresh failed, logout
                 console.error('❌ Token refresh failed:', refreshError);
-                localStorage.removeItem('accessToken');
-                localStorage.removeItem('refreshToken');
 
-                // Only redirect if we're not already on the home page
-                if (typeof window !== 'undefined' && window.location.pathname !== '/') {
-                    console.log('🔄 Redirecting to home page...');
-                    window.location.href = '/';
+                if (typeof window !== 'undefined') {
+                    localStorage.removeItem('accessToken');
+                    localStorage.removeItem('refreshToken');
+
+                    // Only redirect if we're not already on the home page
+                    if (window.location.pathname !== '/') {
+                        console.log('🔄 Redirecting to home page...');
+                        window.location.href = '/';
+                    }
                 }
                 return Promise.reject(refreshError);
             }

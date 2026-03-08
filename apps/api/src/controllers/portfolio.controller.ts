@@ -1,10 +1,17 @@
 import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth';
+import prisma from '../utils/prisma';
 import {
     aggregatePortfolio,
     generateSnapshot,
     getLatestSnapshot,
 } from '../services/portfolio.service';
+import { portfolioLiveService } from '../services/portfolioLive.service';
+
+function writeSseEvent(res: Response, event: string, payload: unknown): void {
+    res.write(`event: ${event}\n`);
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
 
 /**
  * Get aggregated portfolio
@@ -35,7 +42,7 @@ export const getPortfolio = async (req: AuthRequest, res: Response) => {
         const portfolio = await aggregatePortfolio(userId);
         
         // Save snapshot for future cached requests
-        await generateSnapshot(userId);
+        await generateSnapshot(userId, portfolio);
         
         res.json(portfolio);
     } catch (error) {
@@ -55,7 +62,7 @@ export const refreshPortfolio = async (req: AuthRequest, res: Response) => {
         const portfolio = await aggregatePortfolio(userId);
 
         // Save snapshot
-        await generateSnapshot(userId);
+        await generateSnapshot(userId, portfolio);
 
         res.json({ ...portfolio, refreshed: true });
     } catch (error) {
@@ -65,23 +72,104 @@ export const refreshPortfolio = async (req: AuthRequest, res: Response) => {
 };
 
 /**
+ * Stream live portfolio updates over SSE.
+ */
+export const streamPortfolioLive = async (req: AuthRequest, res: Response) => {
+    const userId = req.userId!;
+
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+
+    writeSseEvent(res, 'ready', {
+        connectedAt: new Date().toISOString(),
+    });
+
+    const heartbeat = setInterval(() => {
+        writeSseEvent(res, 'heartbeat', {
+            timestamp: new Date().toISOString(),
+        });
+    }, 20000);
+
+    const unsubscribe = portfolioLiveService.subscribe(userId, ({ portfolio, reason }) => {
+        writeSseEvent(res, 'portfolio', {
+            portfolio,
+            reason,
+        });
+    });
+
+    req.on('close', () => {
+        clearInterval(heartbeat);
+        unsubscribe();
+        res.end();
+    });
+};
+
+/**
  * Get portfolio history (snapshots)
  */
 export const getPortfolioHistory = async (req: AuthRequest, res: Response) => {
     try {
         const userId = req.userId!;
-        const { limit = 30 } = req.query;
+        const { limit = 30, from, to } = req.query;
+        const parsedLimit = Number.parseInt(limit as string, 10);
+        const safeLimit = Number.isNaN(parsedLimit)
+            ? 30
+            : Math.min(Math.max(parsedLimit, 1), 3650);
 
-        const snapshots = await require('../utils/prisma').default.portfolioSnapshot.findMany({
-            where: { userId },
-            orderBy: { generatedAt: 'desc' },
-            take: parseInt(limit as string),
+        const fromDate = typeof from === 'string' && from.length > 0
+            ? new Date(from)
+            : null;
+        const toDate = typeof to === 'string' && to.length > 0
+            ? new Date(to)
+            : null;
+
+        if ((fromDate && Number.isNaN(fromDate.getTime())) || (toDate && Number.isNaN(toDate.getTime()))) {
+            return res.status(400).json({ error: 'Invalid from/to date. Use ISO date values like 2026-03-08.' });
+        }
+
+        if (fromDate && toDate && fromDate > toDate) {
+            return res.status(400).json({ error: '`from` date must be earlier than or equal to `to` date.' });
+        }
+
+        const generatedAtFilter: { gte?: Date; lte?: Date } = {};
+        if (fromDate) {
+            generatedAtFilter.gte = fromDate;
+        }
+        if (toDate) {
+            const isDateOnly = typeof to === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(to);
+            if (isDateOnly) {
+                const inclusiveToDate = new Date(toDate);
+                inclusiveToDate.setHours(23, 59, 59, 999);
+                generatedAtFilter.lte = inclusiveToDate;
+            } else {
+                generatedAtFilter.lte = toDate;
+            }
+        }
+
+        const where = {
+            userId,
+            ...(Object.keys(generatedAtFilter).length > 0
+                ? { generatedAt: generatedAtFilter }
+                : {}),
+        };
+
+        let snapshots = await prisma.portfolioSnapshot.findMany({
+            where,
+            orderBy: { generatedAt: fromDate || toDate ? 'asc' : 'desc' },
+            take: safeLimit,
             select: {
                 id: true,
                 totalValueUsd: true,
                 generatedAt: true,
             },
         });
+
+        if (!fromDate && !toDate) {
+            snapshots = snapshots.reverse();
+        }
 
         res.json(snapshots);
     } catch (error) {
@@ -97,13 +185,14 @@ export const getAssetAllocation = async (req: AuthRequest, res: Response) => {
     try {
         const userId = req.userId!;
         const portfolio = await aggregatePortfolio(userId);
+        const totalValueUsd = portfolio.totalValueUsd;
 
         // Calculate allocation percentages
         const allocation = portfolio.assets.map((asset: any) => ({
             symbol: asset.symbol,
             name: asset.name,
             value: asset.valueUsd,
-            percentage: (asset.valueUsd / portfolio.totalValueUsd) * 100,
+            percentage: totalValueUsd > 0 ? (asset.valueUsd / totalValueUsd) * 100 : 0,
         }));
 
         res.json(allocation);
@@ -172,4 +261,3 @@ export const getPerformanceMetrics = async (req: AuthRequest, res: Response) => 
         res.status(500).json({ error: 'Failed to fetch metrics' });
     }
 };
-

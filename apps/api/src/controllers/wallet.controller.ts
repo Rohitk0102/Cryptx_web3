@@ -11,16 +11,23 @@ export const addWallet = async (req: AuthRequest, res: Response) => {
     try {
         const { address, provider, chainTypes, nickname } = req.body;
         const userId = req.userId!;
+        const requestedChains = Array.isArray(chainTypes)
+            ? chainTypes
+            : ['ethereum', 'polygon', 'bsc'];
+        const normalizedProvider =
+            typeof provider === 'string' ? provider.trim().toLowerCase() : '';
+        const normalizedNickname =
+            typeof nickname === 'string' && nickname.trim() ? nickname.trim() : undefined;
 
         console.log('📥 Add wallet request:', {
             userId,
             address,
-            provider,
-            chainTypes,
-            nickname,
+            provider: normalizedProvider,
+            chainTypes: requestedChains,
+            nickname: normalizedNickname,
         });
 
-        if (!address || !provider) {
+        if (!address || !normalizedProvider) {
             console.log('❌ Missing required fields');
             return res.status(400).json({ error: 'Address and provider are required' });
         }
@@ -28,8 +35,8 @@ export const addWallet = async (req: AuthRequest, res: Response) => {
         // Validate wallet data
         const validation = validateWalletData({
             address,
-            chainTypes: chainTypes || ['ethereum', 'polygon', 'bsc'],
-            provider,
+            chainTypes: requestedChains,
+            provider: normalizedProvider,
         });
 
         console.log('🔍 Validation result:', validation);
@@ -44,7 +51,20 @@ export const addWallet = async (req: AuthRequest, res: Response) => {
 
         // Normalize address and sanitize chain types
         const normalizedAddress = address.toLowerCase();
-        const sanitizedChains = sanitizeChainTypes(chainTypes || ['ethereum', 'polygon', 'bsc']);
+        const sanitizedChains = sanitizeChainTypes(requestedChains);
+        const [user, activeWalletCount] = await Promise.all([
+            prisma.user.findUnique({
+                where: { id: userId },
+                select: { mainAddress: true },
+            }),
+            prisma.wallet.count({
+                where: { userId, isActive: true },
+            }),
+        ]);
+        const shouldUpdatePrimaryAddress =
+            !user?.mainAddress ||
+            user.mainAddress.startsWith('clerk_') ||
+            activeWalletCount === 0;
 
         // Check if wallet already exists
         const existing = await prisma.wallet.findUnique({
@@ -60,34 +80,76 @@ export const addWallet = async (req: AuthRequest, res: Response) => {
             // If wallet exists but is inactive (soft-deleted), reactivate it
             if (!existing.isActive) {
                 console.log('🔄 Reactivating soft-deleted wallet:', existing.id);
-                const reactivatedWallet = await prisma.wallet.update({
-                    where: { id: existing.id },
-                    data: {
-                        isActive: true,
-                        provider,
-                        chainTypes: sanitizedChains,
-                        nickname: nickname || existing.nickname,
-                    },
+                const reactivatedWallet = await prisma.$transaction(async (tx) => {
+                    const updatedWallet = await tx.wallet.update({
+                        where: { id: existing.id },
+                        data: {
+                            isActive: true,
+                            provider: normalizedProvider,
+                            chainTypes: sanitizedChains,
+                            nickname: normalizedNickname || existing.nickname,
+                        },
+                    });
+
+                    if (shouldUpdatePrimaryAddress) {
+                        await tx.user.update({
+                            where: { id: userId },
+                            data: { mainAddress: normalizedAddress },
+                        });
+                    }
+
+                    return updatedWallet;
                 });
-                return res.status(200).json(reactivatedWallet);
+                return res.status(200).json({
+                    ...reactivatedWallet,
+                    reactivated: true,
+                });
             }
-            
-            console.log('❌ Wallet already exists and is active');
-            return res.status(400).json({
-                error: 'This wallet is already connected to your account',
-                code: 'WALLET_ALREADY_EXISTS'
+
+            const mergedChains = Array.from(
+                new Set([
+                    ...sanitizeChainTypes(existing.chainTypes),
+                    ...sanitizedChains,
+                ])
+            );
+
+            console.log('🔁 Wallet already exists and is active. Updating existing wallet metadata:', existing.id);
+            const updatedWallet = await prisma.wallet.update({
+                where: { id: existing.id },
+                data: {
+                    provider: normalizedProvider || existing.provider,
+                    chainTypes: mergedChains,
+                    nickname: normalizedNickname ?? existing.nickname,
+                    isActive: true,
+                },
+            });
+
+            return res.status(200).json({
+                ...updatedWallet,
+                alreadyConnected: true,
             });
         }
 
         // Create wallet
-        const wallet = await prisma.wallet.create({
-            data: {
-                userId,
-                address: normalizedAddress,
-                provider,
-                chainTypes: sanitizedChains,
-                nickname,
-            },
+        const wallet = await prisma.$transaction(async (tx) => {
+            const createdWallet = await tx.wallet.create({
+                data: {
+                    userId,
+                    address: normalizedAddress,
+                    provider: normalizedProvider,
+                    chainTypes: sanitizedChains,
+                    nickname: normalizedNickname,
+                },
+            });
+
+            if (shouldUpdatePrimaryAddress) {
+                await tx.user.update({
+                    where: { id: userId },
+                    data: { mainAddress: normalizedAddress },
+                });
+            }
+
+            return createdWallet;
         });
 
         res.status(201).json(wallet);
@@ -104,12 +166,31 @@ export const getWallets = async (req: AuthRequest, res: Response) => {
     try {
         const userId = req.userId!;
 
-        const wallets = await prisma.wallet.findMany({
-            where: { userId, isActive: true },
-            orderBy: { createdAt: 'desc' },
-        });
+        const [wallets, user] = await Promise.all([
+            prisma.wallet.findMany({
+                where: { userId, isActive: true },
+                orderBy: { createdAt: 'desc' },
+            }),
+            prisma.user.findUnique({
+                where: { id: userId },
+                select: { mainAddress: true },
+            }),
+        ]);
 
-        res.json(wallets);
+        const normalizedWallets = wallets
+            .map((wallet) => ({
+                ...wallet,
+                provider: wallet.provider.trim().toLowerCase(),
+                nickname: wallet.nickname?.trim() || null,
+                chainTypes: sanitizeChainTypes(wallet.chainTypes),
+            }))
+            .sort((a, b) => {
+                if (a.address === user?.mainAddress) return -1;
+                if (b.address === user?.mainAddress) return 1;
+                return 0;
+            });
+
+        res.json(normalizedWallets);
     } catch (error) {
         console.error('Error fetching wallets:', error);
         res.status(500).json({ error: 'Failed to fetch wallets' });
@@ -181,6 +262,28 @@ export const deleteWallet = async (req: AuthRequest, res: Response) => {
             data: { isActive: false },
         });
 
+        const [user, nextPrimaryWallet] = await Promise.all([
+            prisma.user.findUnique({
+                where: { id: userId },
+                select: { mainAddress: true },
+            }),
+            prisma.wallet.findFirst({
+                where: {
+                    userId,
+                    isActive: true,
+                    id: { not: walletId },
+                },
+                orderBy: { createdAt: 'desc' },
+            }),
+        ]);
+
+        if (user?.mainAddress === wallet.address && nextPrimaryWallet) {
+            await prisma.user.update({
+                where: { id: userId },
+                data: { mainAddress: nextPrimaryWallet.address },
+            });
+        }
+
         console.log('✅ Wallet soft-deleted successfully:', {
             id: updated.id,
             address: updated.address,
@@ -232,14 +335,18 @@ export const getWalletBalances = async (req: AuthRequest, res: Response) => {
             provider: wallet.provider,
         });
 
-        if (!chainValidation.isValid) {
+        const sanitizedChains = sanitizeChainTypes(wallet.chainTypes);
+
+        if (sanitizedChains.length === 0) {
             return res.status(400).json({
-                error: 'Invalid wallet configuration',
+                error: 'Wallet has no supported chain types configured',
                 details: chainValidation.errors
             });
         }
 
-        const sanitizedChains = sanitizeChainTypes(wallet.chainTypes);
+        if (!chainValidation.isValid) {
+            console.warn(`Using sanitized chain types for wallet ${wallet.address}:`, chainValidation.errors);
+        }
 
         // Fetch balances across chains (token discovery is now integrated)
         const balances = await getMultiChainBalances(

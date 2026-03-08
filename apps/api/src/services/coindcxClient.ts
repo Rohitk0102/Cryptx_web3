@@ -33,6 +33,25 @@ export interface CoinDCXTrade {
   timestamp: number;
 }
 
+export interface CoinDCXTickerEntry {
+  market: string;
+  change_24_hour: string;
+  high: string;
+  low: string;
+  volume: string;
+  last_price: string;
+  bid: string;
+  ask: string;
+  timestamp: number;
+}
+
+export interface CoinDCXUserInfo {
+  coindcx_id?: string;
+  email?: string;
+  mobile_number?: string;
+  name?: string;
+}
+
 /**
  * Error response from CoinDCX API
  */
@@ -213,6 +232,52 @@ export class CoinDCXClient {
   }
 
   /**
+   * Make unauthenticated GET request to CoinDCX public API.
+   */
+  private async makePublicGetRequest<T>(endpoint: string): Promise<T> {
+    await this.enforceRateLimit();
+
+    const url = `${this.baseUrl}${endpoint}`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        const errorData = data as CoinDCXErrorResponse;
+        const errorMessage = errorData.message || response.statusText;
+
+        if (response.status === 429) {
+          throw new Error('Rate limit exceeded');
+        } else if (response.status >= 500) {
+          throw new Error('CoinDCX service temporarily unavailable');
+        }
+
+        throw new Error(`CoinDCX API error: ${errorMessage}`);
+      }
+
+      return data as T;
+    } catch (error: any) {
+      if (error.message.includes('Rate limit') ||
+          error.message.includes('temporarily unavailable')) {
+        throw error;
+      }
+
+      if (error.name === 'TypeError' || error.code === 'ECONNREFUSED') {
+        throw new Error('Network error: Unable to connect to CoinDCX API');
+      }
+
+      throw new Error(`CoinDCX API request failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Retry operation with exponential backoff
    * 
    * Implements exponential backoff retry logic for handling rate limits and transient errors.
@@ -306,6 +371,31 @@ export class CoinDCXClient {
   }
 
   /**
+   * Get authenticated user info from CoinDCX.
+   *
+   * Useful for diagnostics when a key can read balances but not trade history.
+   */
+  async getUserInfo(): Promise<CoinDCXUserInfo> {
+    return this.retryWithBackoff(async () => {
+      try {
+        const userInfo = await this.makeRequest<CoinDCXUserInfo>(
+          '/exchange/v1/users/info',
+          {}
+        );
+
+        if (!userInfo || typeof userInfo !== 'object') {
+          throw new Error('Invalid response format: expected user info object');
+        }
+
+        return userInfo;
+      } catch (error: any) {
+        console.error('❌ Error fetching user info:', error.message);
+        throw error;
+      }
+    });
+  }
+
+  /**
    * Get trade history from CoinDCX account
    * 
    * Fetches historical trades with optional filtering by symbol and limit.
@@ -321,25 +411,39 @@ export class CoinDCXClient {
   async getTradeHistory(params: {
     symbol?: string;
     limit?: number;
+    sort?: 'asc' | 'desc';
+    fromTimestamp?: number;
+    toTimestamp?: number;
+    fromId?: number;
     from?: number;
     to?: number;
   } = {}): Promise<CoinDCXTrade[]> {
     return this.retryWithBackoff(async () => {
       try {
         const requestParams: Record<string, any> = {
-          limit: Math.min(params.limit || 500, 500), // Default to max 500
+          limit: Math.min(params.limit || 500, 5000), // CoinDCX docs allow max 5000
         };
         
         if (params.symbol) {
           requestParams.symbol = params.symbol;
         }
         
-        if (params.from) {
-          requestParams.from = params.from;
+        if (params.sort) {
+          requestParams.sort = params.sort;
         }
-        
-        if (params.to) {
-          requestParams.to = params.to;
+
+        if (params.fromId !== undefined) {
+          requestParams.from_id = params.fromId;
+        }
+
+        const fromTimestamp = params.fromTimestamp ?? params.from;
+        if (fromTimestamp !== undefined) {
+          requestParams.from_timestamp = fromTimestamp;
+        }
+
+        const toTimestamp = params.toTimestamp ?? params.to;
+        if (toTimestamp !== undefined) {
+          requestParams.to_timestamp = toTimestamp;
         }
 
         console.log(`🔍 Fetching trade history with params:`, requestParams);
@@ -360,6 +464,23 @@ export class CoinDCXClient {
         console.error('❌ Error fetching trade history:', error.message);
         throw error;
       }
+    });
+  }
+
+  /**
+   * Get current ticker snapshot from CoinDCX public API.
+   */
+  async getTicker(): Promise<CoinDCXTickerEntry[]> {
+    return this.retryWithBackoff(async () => {
+      const ticker = await this.makePublicGetRequest<CoinDCXTickerEntry[]>(
+        '/exchange/ticker'
+      );
+
+      if (!Array.isArray(ticker)) {
+        throw new Error('Invalid response format: expected array of tickers');
+      }
+
+      return ticker;
     });
   }
 

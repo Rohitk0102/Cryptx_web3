@@ -1,7 +1,8 @@
-import { CoinDCXClient, CoinDCXBalance, CoinDCXTrade } from './coindcxClient';
+import { CoinDCXClient, CoinDCXBalance, CoinDCXTrade, CoinDCXUserInfo } from './coindcxClient';
 import { encryptCredential, decryptCredential } from '../utils/exchangeEncryption';
 import prisma from '../utils/prisma';
 import redisClient from '../utils/redis';
+import { CostBasisCalculator } from './costBasisCalculator';
 
 /**
  * Exchange Service
@@ -14,12 +15,102 @@ import redisClient from '../utils/redis';
 export class ExchangeService {
   private readonly CACHE_TTL = 300; // 5 minutes in seconds
   private readonly CACHE_PREFIX = 'exchange:';
+  private readonly costBasisCalculator = new CostBasisCalculator(prisma);
+
+  private maskEmail(email?: string): string | undefined {
+    if (!email || !email.includes('@')) {
+      return undefined;
+    }
+
+    const [local, domain] = email.split('@');
+    if (local.length <= 2) {
+      return `${local[0] ?? '*'}***@${domain}`;
+    }
+
+    return `${local.slice(0, 2)}***@${domain}`;
+  }
+
+  private async diagnoseTradeHistoryAccess(
+    client: CoinDCXClient,
+    options: { symbol?: string; limit?: number }
+  ): Promise<{
+    emptyTradeHistory: boolean;
+    userInfo?: {
+      coindcxId?: string;
+      email?: string;
+    };
+    probes: Array<{
+      label: string;
+      count?: number;
+      error?: string;
+    }>;
+    likelyCause: string;
+    recommendation: string;
+    docHint: string;
+  }> {
+    const probes: Array<{ label: string; count?: number; error?: string }> = [];
+    let userInfo: CoinDCXUserInfo | undefined;
+
+    try {
+      userInfo = await client.getUserInfo();
+    } catch (error: any) {
+      probes.push({
+        label: 'user_info',
+        error: error.message || 'Unable to read user info',
+      });
+    }
+
+    const variants: Array<{ label: string; params: { symbol?: string; limit?: number; sort?: 'asc' | 'desc'; fromTimestamp?: number } }> = [
+      { label: 'default_limit', params: { symbol: options.symbol, limit: options.limit || 10 } },
+      { label: 'ascending_sort', params: { symbol: options.symbol, limit: options.limit || 10, sort: 'asc' } },
+      { label: 'from_timestamp_zero', params: { symbol: options.symbol, limit: options.limit || 10, fromTimestamp: 0 } },
+    ];
+
+    for (const variant of variants) {
+      try {
+        const trades = await client.getTradeHistory(variant.params);
+        probes.push({
+          label: variant.label,
+          count: trades.length,
+        });
+      } catch (error: any) {
+        probes.push({
+          label: variant.label,
+          error: error.message || 'Request failed',
+        });
+      }
+    }
+
+    return {
+      emptyTradeHistory: true,
+      userInfo: userInfo
+        ? {
+            coindcxId: userInfo.coindcx_id,
+            email: this.maskEmail(userInfo.email),
+          }
+        : undefined,
+      probes,
+      likelyCause: 'The API key can read balances but CoinDCX is returning no spot trade history for the documented trade-history endpoint.',
+      recommendation: 'Verify that this key belongs to the same CoinDCX account shown in the web app, has spot order/trade history access, and is the correct master vs sub-account API key.',
+      docHint: 'CoinDCX docs note that master-account and sub-account API keys are different, and trade-history APIs also differ between them.',
+    };
+  }
 
   /**
    * Generate cache key for exchange balances
    */
   private getCacheKey(accountId: string): string {
     return `${this.CACHE_PREFIX}balances:${accountId}`;
+  }
+
+  private async recalculateUserHoldings(userId: string): Promise<void> {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { costBasisMethod: true },
+    });
+
+    const method = (user?.costBasisMethod || 'FIFO') as 'FIFO' | 'LIFO' | 'WEIGHTED_AVERAGE';
+    await this.costBasisCalculator.updateAllHoldings(userId, method);
   }
 
   /**
@@ -165,10 +256,15 @@ export class ExchangeService {
 
     // Create initial PnL transactions for balances without existing transactions
     await this.createInitialTransactionsForBalances(accountId, account.userId, balances);
+    await this.recalculateUserHoldings(account.userId);
 
     // Invalidate cache
-    const cacheKey = this.getCacheKey(accountId);
-    await redisClient.del(cacheKey);
+    const accountCacheKey = this.getCacheKey(accountId);
+    const userCacheKey = `${this.CACHE_PREFIX}user:${account.userId}`;
+    await Promise.all([
+      redisClient.del(accountCacheKey),
+      redisClient.del(userCacheKey),
+    ]);
 
     console.log(`✅ Balances synced successfully for account ${accountId}`);
   }
@@ -319,7 +415,25 @@ export class ExchangeService {
   async syncTradeHistory(
     accountId: string,
     options: { symbol?: string; limit?: number; maxBatches?: number } = {}
-  ): Promise<void> {
+  ): Promise<{
+    newTradesCount: number;
+    totalTrades: number;
+    diagnostics?: {
+      emptyTradeHistory: boolean;
+      userInfo?: {
+        coindcxId?: string;
+        email?: string;
+      };
+      probes: Array<{
+        label: string;
+        count?: number;
+        error?: string;
+      }>;
+      likelyCause: string;
+      recommendation: string;
+      docHint: string;
+    };
+  }> {
     console.log(`🔄 Syncing trade history for account ${accountId}...`);
 
     // Fetch account with credentials
@@ -344,29 +458,31 @@ export class ExchangeService {
     const batchSize = options.limit || 500;
     const maxBatches = Math.min(options.maxBatches || 10, 50); // Cap at 50 batches
     
-    let allTrades: any[] = [];
+    let allTrades: CoinDCXTrade[] = [];
     let oldestTimestamp: number | undefined;
     let batchCount = 0;
+    let fetchedCompleteHistory = false;
 
     console.log(`📊 Fetching trades in batches (max ${maxBatches} batches of ${batchSize} trades each)...`);
 
     // Fetch trades in batches going back in time
     while (batchCount < maxBatches) {
       try {
-        const batchParams: any = {
+        const batchParams: { symbol?: string; limit: number; toTimestamp?: number } = {
           symbol: options.symbol,
           limit: batchSize,
         };
 
         // If we have an oldest timestamp, fetch trades before that
         if (oldestTimestamp) {
-          batchParams.to = oldestTimestamp - 1; // Fetch trades before the oldest we've seen
+          batchParams.toTimestamp = oldestTimestamp - 1; // Fetch trades before the oldest we've seen
         }
 
         const trades = await client.getTradeHistory(batchParams);
         
         if (trades.length === 0) {
           console.log(`✅ No more trades to fetch (batch ${batchCount + 1})`);
+          fetchedCompleteHistory = true;
           break; // No more trades available
         }
 
@@ -382,6 +498,7 @@ export class ExchangeService {
         // If we got fewer trades than requested, we've reached the end
         if (trades.length < batchSize) {
           console.log(`✅ Reached end of trade history (batch ${batchCount})`);
+          fetchedCompleteHistory = true;
           break;
         }
 
@@ -426,7 +543,43 @@ export class ExchangeService {
     console.log(`✅ Stored ${newTradesCount} new trades for account ${accountId}`);
     
     // Convert exchange trades to transactions for P&L calculation
-    await this.convertTradesToTransactions(accountId, account.userId);
+    await this.convertTradesToTransactions(accountId, account.userId, {
+      clearInitialBalances: fetchedCompleteHistory,
+    });
+    await this.recalculateUserHoldings(account.userId);
+
+    let diagnostics:
+      | {
+          emptyTradeHistory: boolean;
+          userInfo?: {
+            coindcxId?: string;
+            email?: string;
+          };
+          probes: Array<{
+            label: string;
+            count?: number;
+            error?: string;
+          }>;
+          likelyCause: string;
+          recommendation: string;
+          docHint: string;
+        }
+      | undefined;
+
+    if (allTrades.length === 0) {
+      diagnostics = await this.diagnoseTradeHistoryAccess(client, {
+        symbol: options.symbol,
+        limit: Math.min(batchSize, 10),
+      });
+    }
+
+    return {
+      newTradesCount,
+      totalTrades: await prisma.exchangeTrade.count({
+        where: { exchangeAccountId: accountId },
+      }),
+      diagnostics,
+    };
   }
 
   /**
@@ -438,7 +591,13 @@ export class ExchangeService {
    * @param accountId - Exchange account ID
    * @param userId - User ID
    */
-  private async convertTradesToTransactions(accountId: string, userId: string): Promise<void> {
+  private async convertTradesToTransactions(
+    accountId: string,
+    userId: string,
+    options: {
+      clearInitialBalances?: boolean;
+    } = {}
+  ): Promise<void> {
     console.log(`🔄 Converting exchange trades to PnL transactions for account ${accountId}...`);
 
     // Get all trades for this account
@@ -450,6 +609,7 @@ export class ExchangeService {
     console.log(`📊 Found ${trades.length} trades to convert`);
 
     let convertedCount = 0;
+    const tradedTokens = new Set<string>();
     for (const trade of trades) {
       try {
         // Parse symbol to get base and quote currencies
@@ -462,6 +622,8 @@ export class ExchangeService {
 
         const baseCurrency = symbolMatch[1];
         const quoteCurrency = symbolMatch[2];
+        void quoteCurrency;
+        tradedTokens.add(baseCurrency);
 
         // Create transaction record
         // For buy: you receive baseCurrency, spend quoteCurrency
@@ -512,6 +674,23 @@ export class ExchangeService {
     }
 
     console.log(`✅ Converted ${convertedCount} trades to PnL transactions`);
+
+    if (options.clearInitialBalances && tradedTokens.size > 0) {
+      const deletedInitialBalances = await prisma.pnLTransaction.deleteMany({
+        where: {
+          userId,
+          walletAddress: `exchange:${accountId}`,
+          tokenSymbol: { in: Array.from(tradedTokens) },
+          source: 'coindcx:initial_balance',
+        },
+      });
+
+      if (deletedInitialBalances.count > 0) {
+        console.log(
+          `🧹 Removed ${deletedInitialBalances.count} synthetic initial balance transactions after full trade sync`
+        );
+      }
+    }
   }
 
   /**

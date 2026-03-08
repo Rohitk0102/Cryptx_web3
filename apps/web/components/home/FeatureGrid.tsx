@@ -1,13 +1,10 @@
 'use client';
 
-import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Card, CardTitle, CardDescription } from '@/components/ui/Card';
-import AddWalletModal from '@/components/wallet/AddWalletModal';
 
 export default function FeatureGrid() {
     const router = useRouter();
-    const [showAddWallet, setShowAddWallet] = useState(false);
 
     // This component is only rendered when the user is signed in (checked in parent page.tsx)
     // So we can directly navigate without auth checks
@@ -44,41 +41,28 @@ export default function FeatureGrid() {
             title: "Link Another Wallet",
             desc: "Add additional wallets to your portfolio",
             action: () => {
-                setShowAddWallet(true);
+                router.push('/dashboard/wallets');
             }
         }
     ];
 
     return (
-        <>
-            <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-6xl mx-auto">
-                {features.map((feature, idx) => (
-                    <Card
-                        key={idx}
-                        hover={true}
-                        onClick={feature.action}
-                        className="p-8"
-                    >
-                        <CardTitle className="mb-3">
-                            {feature.title}
-                        </CardTitle>
-                        <CardDescription>
-                            {feature.desc}
-                        </CardDescription>
-                    </Card>
-                ))}
-            </div>
-
-            {showAddWallet && (
-                <AddWalletModal
-                    isOpen={showAddWallet}
-                    onClose={() => setShowAddWallet(false)}
-                    onSuccess={() => {
-                        setShowAddWallet(false);
-                        router.push('/dashboard/portfolio');
-                    }}
-                />
-            )}
-        </>
+        <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-6 max-w-6xl mx-auto">
+            {features.map((feature, idx) => (
+                <Card
+                    key={idx}
+                    hover={true}
+                    onClick={feature.action}
+                    className="p-8"
+                >
+                    <CardTitle className="mb-3">
+                        {feature.title}
+                    </CardTitle>
+                    <CardDescription>
+                        {feature.desc}
+                    </CardDescription>
+                </Card>
+            ))}
+        </div>
     );
 }

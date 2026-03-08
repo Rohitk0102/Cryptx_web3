@@ -11,6 +11,7 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
   const [accounts, setAccounts] = useState<ExchangeAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [syncingAccountId, setSyncingAccountId] = useState<string | null>(null);
   const [syncingTradesAccountId, setSyncingTradesAccountId] = useState<string | null>(null);
   const [removingAccountId, setRemovingAccountId] = useState<string | null>(null);
@@ -22,6 +23,7 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
   const fetchAccounts = async () => {
     setLoading(true);
     setError('');
+    setNotice('');
     
     try {
       const data = await exchangeApi.getAccounts();
@@ -37,6 +39,7 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
   const handleSync = async (accountId: string) => {
     setSyncingAccountId(accountId);
     setError('');
+    setNotice('');
 
     try {
       await exchangeApi.syncBalances(accountId);
@@ -59,6 +62,7 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
   const handleSyncTrades = async (accountId: string) => {
     setSyncingTradesAccountId(accountId);
     setError('');
+    setNotice('');
 
     try {
       const result = await exchangeApi.syncTradeHistory(accountId, {
@@ -66,6 +70,12 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
       });
       
       console.log(`✅ Synced ${result.tradeCount} trades from CoinDCX`);
+
+      if (result.warning) {
+        setNotice(result.warning);
+      } else if (result.newTradesCount === 0 && result.tradeCount === 0) {
+        setNotice('CoinDCX did not return any trade history for this API key.');
+      }
       
       // Refresh accounts to get updated lastSyncedAt
       await fetchAccounts();
@@ -89,6 +99,7 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
 
     setRemovingAccountId(accountId);
     setError('');
+    setNotice('');
 
     try {
       await exchangeApi.deleteAccount(accountId);
@@ -155,6 +166,19 @@ export default function ExchangeAccountList({ onAccountsChange }: ExchangeAccoun
             </svg>
             <div className="flex-1">
               <div className="text-error text-sm font-medium">{error}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notice && (
+        <div className="p-4 rounded-[2px] bg-[#F59E0B]/10 border border-[#F59E0B]/30">
+          <div className="flex items-start gap-3">
+            <svg className="w-5 h-5 text-[#F59E0B] flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <div className="flex-1">
+              <div className="text-[#FCD34D] text-sm font-medium">{notice}</div>
             </div>
           </div>
         </div>

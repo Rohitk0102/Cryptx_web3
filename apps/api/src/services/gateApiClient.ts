@@ -29,6 +29,11 @@ export interface MarketStats {
   low24h: number;
 }
 
+interface CacheEntry<T> {
+  data: T;
+  timestamp: number;
+}
+
 /**
  * Market Data API Client (CoinGecko)
  * 
@@ -41,8 +46,11 @@ export interface MarketStats {
  */
 export class MarketDataClient {
   private baseUrl: string;
-  private lastRequestTime: number = 0;
-  private minRequestInterval: number = 1000; // Minimum 1 second between requests
+  private lastCoinGeckoRequestTime: number = 0;
+  private minCoinGeckoRequestInterval: number = 1500;
+  private marketStatsCache = new Map<string, CacheEntry<MarketStats>>();
+  private marketStatsCacheTtlMs = 30_000;
+  private inFlightMarketStats = new Map<string, Promise<MarketStats>>();
 
   /**
    * Initialize Market Data API client with configuration
@@ -57,17 +65,34 @@ export class MarketDataClient {
    * Throttle requests to avoid rate limiting
    * Ensures minimum time between API requests
    */
-  private async throttleRequest(): Promise<void> {
+  private async throttleCoinGeckoRequest(): Promise<void> {
     const now = Date.now();
-    const timeSinceLastRequest = now - this.lastRequestTime;
+    const timeSinceLastRequest = now - this.lastCoinGeckoRequestTime;
     
-    if (timeSinceLastRequest < this.minRequestInterval) {
-      const waitTime = this.minRequestInterval - timeSinceLastRequest;
-      console.log(`⏱️  Throttling request, waiting ${waitTime}ms...`);
+    if (timeSinceLastRequest < this.minCoinGeckoRequestInterval) {
+      const waitTime = this.minCoinGeckoRequestInterval - timeSinceLastRequest;
+      console.log(`⏱️  Throttling CoinGecko request, waiting ${waitTime}ms...`);
       await new Promise(resolve => setTimeout(resolve, waitTime));
     }
     
-    this.lastRequestTime = Date.now();
+    this.lastCoinGeckoRequestTime = Date.now();
+  }
+
+  private getCachedMarketStats(symbol: string, allowStale = false): MarketStats | null {
+    const cached = this.marketStatsCache.get(symbol);
+    if (!cached) {
+      return null;
+    }
+
+    if (allowStale || Date.now() - cached.timestamp < this.marketStatsCacheTtlMs) {
+      return cached.data;
+    }
+
+    return null;
+  }
+
+  private setCachedMarketStats(symbol: string, data: MarketStats): void {
+    this.marketStatsCache.set(symbol, { data, timestamp: Date.now() });
   }
 
   /**
@@ -118,9 +143,6 @@ export class MarketDataClient {
     from: number,
     to: number
   ): Promise<CandlestickData[]> {
-    // Throttle request to avoid rate limiting
-    await this.throttleRequest();
-    
     // Wrap the operation in retry logic
     return this.retryWithBackoff(async () => {
       try {
@@ -239,12 +261,20 @@ export class MarketDataClient {
    * Requirements: 1.3, 2.1
    */
   async getMarketStats(symbol: string): Promise<MarketStats> {
-    // Throttle request to avoid rate limiting
-    await this.throttleRequest();
-    
-    // Wrap the operation in retry logic
-    return this.retryWithBackoff(async () => {
+    const cached = this.getCachedMarketStats(symbol);
+    if (cached) {
+      return cached;
+    }
+
+    const inFlight = this.inFlightMarketStats.get(symbol);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const request = this.retryWithBackoff(async () => {
       try {
+        await this.throttleCoinGeckoRequest();
+
         // Convert symbol to CoinGecko coin ID
         const coinId = this.symbolToCoinId(symbol);
 
@@ -288,7 +318,7 @@ export class MarketDataClient {
           throw new Error('Missing required fields in market statistics data');
         }
 
-        return {
+        const marketStats = {
           symbol: symbol,
           lastPrice: Number(marketData.current_price),
           priceChange24h: Number(marketData.price_change_percentage_24h),
@@ -296,6 +326,9 @@ export class MarketDataClient {
           high24h: Number(marketData.high_24h),
           low24h: Number(marketData.low_24h),
         };
+
+        this.setCachedMarketStats(symbol, marketStats);
+        return marketStats;
       } catch (error: any) {
         // If error already has a descriptive message, re-throw it
         if (error.message.includes('Rate limit') || 
@@ -309,7 +342,23 @@ export class MarketDataClient {
         // Re-throw with descriptive message
         throw new Error(`Failed to fetch market statistics: ${error.message}`);
       }
+    }).catch((error: Error) => {
+      const staleMarketStats = this.getCachedMarketStats(symbol, true);
+      if (staleMarketStats) {
+        console.warn(`⚠️ Returning stale market stats for ${symbol}: ${error.message}`);
+        return staleMarketStats;
+      }
+
+      throw error;
     });
+
+    this.inFlightMarketStats.set(symbol, request);
+
+    try {
+      return await request;
+    } finally {
+      this.inFlightMarketStats.delete(symbol);
+    }
   }
 
   /**
@@ -356,8 +405,10 @@ export class MarketDataClient {
           `Reason: ${isRateLimitError ? 'Rate limit' : 'Server error'}`
         );
 
-        // Wait before retrying with exponential backoff
-        await new Promise(resolve => setTimeout(resolve, delay));
+        const retryDelay = delay + Math.floor(Math.random() * 250);
+
+        // Wait before retrying with exponential backoff and a small jitter
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
 
         // Double the delay for next retry (exponential backoff), max 30 seconds
         delay = Math.min(delay * 2, 30000);

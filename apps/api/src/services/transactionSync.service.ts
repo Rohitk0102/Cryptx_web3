@@ -16,6 +16,7 @@ import { PrismaClient } from '@prisma/client';
 import { Decimal } from '../utils/decimal';
 import { PriceFetchingService } from './priceFetching.service';
 import { CostBasisCalculator } from './costBasisCalculator';
+import redis from '../utils/redis';
 
 export interface RawTransaction {
   hash: string;
@@ -41,7 +42,11 @@ export interface SyncResult {
 }
 
 export interface BlockchainServiceInterface {
-  getTransactions(walletAddress: string, chain: string): Promise<RawTransaction[]>;
+  getTransactions(
+    walletAddress: string,
+    chain: string,
+    options?: { startBlock?: number }
+  ): Promise<RawTransaction[]>;
 }
 
 export class TransactionSyncService {
@@ -174,83 +179,134 @@ export class TransactionSyncService {
     walletAddress: string,
     chain: string
   ): Promise<SyncResult> {
-    // Fetch transactions from blockchain (Requirement 2.1)
     if (!this.blockchainService) {
       throw new Error('Blockchain service not configured');
     }
 
+    // Read last synced block from Redis to enable incremental sync.
+    // Falls back to block 0 (full sync) if Redis is unavailable.
+    const lastBlockKey = `lastblock:${walletAddress}:${chain}`;
+    let startBlock = 0;
+    try {
+      const lastBlock = await redis.get(lastBlockKey);
+      if (lastBlock) {
+        startBlock = parseInt(lastBlock, 10) + 1;
+      }
+    } catch (redisReadError) {
+      console.warn(
+        `[Sync] Redis unavailable reading lastBlock for ${walletAddress}:${chain}, syncing from block 0:`,
+        redisReadError
+      );
+    }
+
     const rawTransactions = await this.blockchainService.getTransactions(
       walletAddress,
-      chain
+      chain,
+      { startBlock }
     );
 
-    let newCount = 0;
+    if (rawTransactions.length === 0) {
+      return { newTransactionsCount: 0 };
+    }
 
-    // Process each transaction
-    for (const rawTx of rawTransactions) {
+    // STEP 1 — Bulk deduplication: one DB round-trip instead of N
+    const existingHashes = await this.prisma.pnLTransaction.findMany({
+      where: {
+        userId,
+        walletAddress,
+        txHash: { in: rawTransactions.map((t) => t.hash) },
+      },
+      select: { txHash: true },
+    });
+    const existingHashSet = new Set(existingHashes.map((t) => t.txHash));
+    const newTransactions = rawTransactions.filter(
+      (tx) => !existingHashSet.has(tx.hash)
+    );
+
+    if (newTransactions.length === 0) {
+      return { newTransactionsCount: 0 };
+    }
+
+    // STEP 2 — Fetch all user wallets for own-transfer detection (once, before loop)
+    const userWallets = await this.prisma.wallet.findMany({
+      where: { userId, isActive: true },
+      select: { address: true },
+    });
+    const ownWalletAddresses = new Set(
+      userWallets.map((w) => w.address.toLowerCase())
+    );
+
+    // STEP 3 — Batch price fetch: one Promise.allSettled for all unique symbol+timestamp pairs
+    const uniquePairs = [
+      ...new Set(
+        newTransactions.map(
+          (tx) => `${tx.tokenSymbol}:${tx.timestamp.toISOString()}`
+        )
+      ),
+    ];
+    const priceResults = await Promise.allSettled(
+      uniquePairs.map(async (pair) => {
+        const colonIdx = pair.indexOf(':');
+        const symbol = pair.slice(0, colonIdx);
+        const ts = pair.slice(colonIdx + 1);
+        const price = await this.priceService.getHistoricalPrice(
+          symbol,
+          new Date(ts)
+        );
+        return { key: pair, price };
+      })
+    );
+    const priceMap = new Map<string, Decimal>();
+    priceResults.forEach((r) => {
+      if (r.status === 'fulfilled' && r.value.price) {
+        priceMap.set(r.value.key, r.value.price);
+      }
+    });
+
+    // STEP 4 — Build records and bulk insert: one DB round-trip instead of N
+    const records = newTransactions.map((rawTx) => {
+      const priceKey = `${rawTx.tokenSymbol}:${rawTx.timestamp.toISOString()}`;
+      const priceUsd = priceMap.get(priceKey) ?? new Decimal(0);
+      const txType = this.classifyTransaction(rawTx, walletAddress, ownWalletAddresses);
+      const quantity = new Decimal(rawTx.value);
+      const feeAmount = rawTx.fee ? new Decimal(rawTx.fee).toString() : null;
+
+      return {
+        userId,
+        walletAddress,
+        chain,
+        tokenSymbol: rawTx.tokenSymbol || 'UNKNOWN',
+        txType,
+        quantity: quantity.toString(),
+        priceUsd: priceUsd.toString(),
+        feeAmount,
+        feeToken: rawTx.feeToken ?? null,
+        timestamp: rawTx.timestamp,
+        txHash: rawTx.hash,
+        source: 'wallet',
+      };
+    });
+
+    const { count: newCount } = await this.prisma.pnLTransaction.createMany({
+      data: records,
+      skipDuplicates: true, // safety net — dedup already done above
+    });
+
+    // Persist the highest block number seen so the next sync starts from there.
+    // Falls through silently if Redis is unavailable — worst case is a redundant full sync.
+    const maxBlock = rawTransactions.reduce(
+      (max, tx) =>
+        tx.blockNumber && tx.blockNumber > max ? tx.blockNumber : max,
+      startBlock
+    );
+    if (maxBlock > 0) {
       try {
-        // Check for duplicate (Requirement 2.3)
-        const exists = await this.prisma.pnLTransaction.findUnique({
-          where: {
-            userId_txHash_walletAddress: {
-              userId,
-              txHash: rawTx.hash,
-              walletAddress,
-            },
-          },
-        });
-
-        if (exists) {
-          continue; // Skip duplicate
-        }
-
-        // Fetch historical price if not provided
-        let priceUsd = new Decimal(0);
-        if (rawTx.tokenSymbol) {
-          const price = await this.priceService.getHistoricalPrice(
-            rawTx.tokenSymbol,
-            rawTx.timestamp
-          );
-          if (price) {
-            priceUsd = price;
-          }
-        }
-
-        // Classify transaction type
-        const txType = this.classifyTransaction(rawTx, walletAddress);
-
-        // Calculate quantity (convert from wei/smallest unit if needed)
-        const quantity = new Decimal(rawTx.value);
-
-        // Calculate fee amount
-        let feeAmount: Decimal | null = null;
-        if (rawTx.fee) {
-          feeAmount = new Decimal(rawTx.fee);
-        }
-
-        // Store transaction
-        // Convert Decimal to string for Prisma (Prisma will handle the conversion)
-        await this.prisma.pnLTransaction.create({
-          data: {
-            userId,
-            walletAddress,
-            chain,
-            tokenSymbol: rawTx.tokenSymbol || 'UNKNOWN',
-            txType,
-            quantity: quantity.toString(),
-            priceUsd: priceUsd.toString(),
-            feeAmount: feeAmount ? feeAmount.toString() : null,
-            feeToken: rawTx.feeToken || null,
-            timestamp: rawTx.timestamp,
-            txHash: rawTx.hash,
-            source: 'wallet',
-          },
-        });
-
-        newCount++;
-      } catch (error) {
-        console.error(`Failed to process transaction ${rawTx.hash}:`, error);
-        // Continue with next transaction
+        await redis.set(lastBlockKey, maxBlock.toString());
+      } catch (redisWriteError) {
+        console.warn(
+          `[Sync] Redis unavailable writing lastBlock for ${walletAddress}:${chain}:`,
+          redisWriteError
+        );
       }
     }
 
@@ -272,7 +328,8 @@ export class TransactionSyncService {
    */
   private classifyTransaction(
     rawTx: RawTransaction,
-    walletAddress: string
+    walletAddress: string,
+    ownWalletAddresses: Set<string>
   ): string {
     const normalizedWallet = walletAddress.toLowerCase();
     const from = rawTx.from.toLowerCase();
@@ -288,9 +345,9 @@ export class TransactionSyncService {
       return 'fee';
     }
 
-    // Receiving tokens (buy or receive)
+    // Receiving tokens — own-wallet transfer ('receive') vs external purchase ('buy')
     if (to === normalizedWallet) {
-      return 'buy';
+      return ownWalletAddresses.has(from) ? 'receive' : 'buy';
     }
 
     // Sending tokens (sell or send)

@@ -72,14 +72,20 @@ export class ForecastingService {
       throw new Error(`Insufficient historical data: only ${candlesticks.length} data points available (need at least 30)`);
     }
     
-    // Add a small delay before fetching market stats to avoid rate limits
-    await new Promise(resolve => setTimeout(resolve, 500));
-    
-    // Fetch market stats
-    const marketStats = await this.marketDataClient.getMarketStats(symbol);
-    
     const prices = candlesticks.map(c => c.close);
-    const currentPrice = marketStats.lastPrice;
+    let currentPrice = prices[prices.length - 1];
+
+    try {
+      // Add a small delay before fetching market stats to avoid rate limits
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const marketStats = await this.marketDataClient.getMarketStats(symbol);
+      currentPrice = marketStats.lastPrice;
+    } catch (error: any) {
+      console.warn(
+        `⚠️ Falling back to latest closing price for ${symbol} because market stats fetch failed: ${error.message}`
+      );
+    }
+
     const indicators = this.technicalEngine.calculateAllIndicators(candlesticks);
     const riskAnalysis = this.riskAnalyzer.analyzeRisk(candlesticks, indicators);
     const forecasts = await this.aiForecaster.generateForecasts(prices, currentPrice, riskAnalysis.volatility.annualized);

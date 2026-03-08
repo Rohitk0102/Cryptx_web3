@@ -1,9 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { coinGeckoApi } from '@/lib/coinGeckoApi';
 import { forecastingApi, ForecastData } from '@/lib/forecastingApi';
 
 interface TokenOverview {
+  coinId: string;
   symbol: string;
   name: string;
   price: number;
@@ -12,23 +14,26 @@ interface TokenOverview {
   icon: string;
 }
 
+function getErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : 'Unexpected error';
+}
+
 const TOKEN_BASE: Omit<TokenOverview, 'price' | 'change24h' | 'marketCap'>[] = [
-  { symbol: 'BTC_USDT', name: 'Bitcoin', icon: '₿' },
-  { symbol: 'ETH_USDT', name: 'Ethereum', icon: 'Ξ' },
-  { symbol: 'BNB_USDT', name: 'BNB', icon: '🔶' },
-  { symbol: 'SOL_USDT', name: 'Solana', icon: '◎' },
-  { symbol: 'ADA_USDT', name: 'Cardano', icon: '₳' },
-  { symbol: 'XRP_USDT', name: 'XRP', icon: '✕' },
-  { symbol: 'DOT_USDT', name: 'Polkadot', icon: '●' },
-  { symbol: 'MATIC_USDT', name: 'Polygon', icon: '⬡' },
-  { symbol: 'LINK_USDT', name: 'Chainlink', icon: '🔗' },
-  { symbol: 'UNI_USDT', name: 'Uniswap', icon: '🦄' },
-  { symbol: 'AVAX_USDT', name: 'Avalanche', icon: '🔺' },
-  { symbol: 'TRX_USDT', name: 'TRON', icon: '◬' },
+  { coinId: 'bitcoin', symbol: 'BTC_USDT', name: 'Bitcoin', icon: '₿' },
+  { coinId: 'ethereum', symbol: 'ETH_USDT', name: 'Ethereum', icon: 'Ξ' },
+  { coinId: 'binancecoin', symbol: 'BNB_USDT', name: 'BNB', icon: '🔶' },
+  { coinId: 'solana', symbol: 'SOL_USDT', name: 'Solana', icon: '◎' },
+  { coinId: 'cardano', symbol: 'ADA_USDT', name: 'Cardano', icon: '₳' },
+  { coinId: 'ripple', symbol: 'XRP_USDT', name: 'XRP', icon: '✕' },
+  { coinId: 'polkadot', symbol: 'DOT_USDT', name: 'Polkadot', icon: '●' },
+  { coinId: 'polygon', symbol: 'MATIC_USDT', name: 'Polygon', icon: '⬡' },
+  { coinId: 'chainlink', symbol: 'LINK_USDT', name: 'Chainlink', icon: '🔗' },
+  { coinId: 'uniswap', symbol: 'UNI_USDT', name: 'Uniswap', icon: '🦄' },
+  { coinId: 'avalanche-2', symbol: 'AVAX_USDT', name: 'Avalanche', icon: '🔺' },
+  { coinId: 'tron', symbol: 'TRX_USDT', name: 'TRON', icon: '◬' },
 ];
 
 export default function ForecastingPage() {
-  const [symbols, setSymbols] = useState<string[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState('');
   const [forecast, setForecast] = useState<ForecastData | null>(null);
   const [loading, setLoading] = useState(false);
@@ -43,18 +48,19 @@ export default function ForecastingPage() {
   const loadTokenOverviews = async () => {
     const tokenData: TokenOverview[] = TOKEN_BASE.map(t => ({ ...t, price: 0, change24h: 0, marketCap: '' }));
     try {
-      const coinIds = ['bitcoin', 'ethereum', 'binancecoin', 'solana', 'cardano', 'ripple', 'polkadot', 'polygon', 'chainlink', 'uniswap', 'avalanche-2', 'tron'];
-      const res = await fetch(`https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&ids=${coinIds.join(',')}&order=market_cap_desc`);
-      if (res.ok) {
-        const data = await res.json();
-        data.forEach((coin: any, i: number) => {
-          if (tokenData[i]) {
-            tokenData[i].price = coin.current_price;
-            tokenData[i].change24h = coin.price_change_percentage_24h || 0;
-            tokenData[i].marketCap = `$${(coin.market_cap / 1e9).toFixed(2)}B`;
-          }
-        });
-      }
+      const data = await coinGeckoApi.getTokenPrices(TOKEN_BASE.map((token) => token.coinId));
+      const marketDataById = new Map(data.map((coin) => [coin.id, coin]));
+
+      tokenData.forEach((token) => {
+        const marketData = marketDataById.get(token.coinId);
+        if (!marketData) {
+          return;
+        }
+
+        token.price = marketData.current_price;
+        token.change24h = marketData.price_change_percentage_24h || 0;
+        token.marketCap = `$${(marketData.market_cap / 1e9).toFixed(2)}B`;
+      });
     } catch (e) { console.error('Error fetching prices:', e); }
     setTokenOverviews(tokenData);
   };
@@ -62,15 +68,14 @@ export default function ForecastingPage() {
   const loadSymbols = async () => {
     try {
       const data = await forecastingApi.getSupportedSymbols();
-      setSymbols(data);
       if (data.length > 0) setSelectedSymbol(data[0]);
-    } catch (e: any) { setError(e.message); }
+    } catch (error: unknown) { setError(getErrorMessage(error)); }
   };
 
   const loadForecast = async (symbol: string) => {
     setLoading(true); setError(null);
     try { setForecast(await forecastingApi.getForecast(symbol)); }
-    catch (e: any) { setError(e.message); }
+    catch (error: unknown) { setError(getErrorMessage(error)); }
     finally { setLoading(false); }
   };
 
@@ -226,7 +231,7 @@ export default function ForecastingPage() {
           <div>
             <h2 className="text-lg font-bold text-[#F5F5F5] mb-2">💰 Profit/Loss Predictions</h2>
             <p className="text-sm text-[#D5D5D5]/60 mb-4">
-              If you invest ${investmentAmount.toLocaleString()} now, here's what you could expect:
+              If you invest ${investmentAmount.toLocaleString()} now, here&apos;s what you could expect:
             </p>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {forecast.forecasts.map((f) => {

@@ -29,6 +29,7 @@ export interface TokenPnL {
   tokenSymbol: string;
   realizedPnL: string;
   transactionCount?: number;
+  hasUnknownCostBasis?: boolean;
   holdings?: string;
   costBasis?: string;
   currentValue?: string;
@@ -60,6 +61,7 @@ export interface PnLSummaryResponse {
   totalRealizedPnL: string;
   totalUnrealizedPnL: string;
   totalPnL: string;
+  totalPnLPercentage?: string;
   costBasisMethod: string;
   byToken: TokenPnL[];
 }

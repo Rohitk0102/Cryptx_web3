@@ -35,6 +35,16 @@
   --brand-primary: #00FFB2;
   --brand-secondary: #00CA8D;
   --accent: #00FFB2;
+  --brand-button-bg: linear-gradient(135deg, #34d7a7 0%, #119d73 100%);
+  --brand-button-bg-hover: linear-gradient(135deg, #43e2b4 0%, #14aa7d 100%);
+  --brand-button-border: rgba(196, 255, 231, 0.2);
+  --brand-button-text: #03140f;
+  --brand-button-shadow: 0 14px 30px rgba(0, 202, 141, 0.2);
+  --brand-button-shadow-hover: 0 18px 36px rgba(0, 202, 141, 0.26);
+  --brand-button-soft-bg: rgba(0, 255, 178, 0.1);
+  --brand-button-soft-bg-hover: rgba(0, 255, 178, 0.15);
+  --brand-button-soft-border: rgba(0, 255, 178, 0.28);
+  --brand-button-soft-text: #D8FFF2;
 
   /* Borders */
   --border: rgba(255, 255, 255, 0.1);
@@ -97,6 +107,52 @@ body {
   box-shadow: 0 0 34px 0 rgba(42, 240, 124, 0.3);
 }
 
+.btn-brand-solid {
+  background: var(--brand-button-bg);
+  color: var(--brand-button-text);
+  border: 1px solid var(--brand-button-border);
+  box-shadow: var(--brand-button-shadow);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition:
+    transform var(--transition),
+    box-shadow var(--transition),
+    border-color var(--transition),
+    color var(--transition);
+}
+
+.btn-brand-solid:hover:not(:disabled) {
+  background: var(--brand-button-bg-hover);
+  box-shadow: var(--brand-button-shadow-hover);
+  transform: translateY(-1px);
+}
+
+.btn-brand-solid:focus-visible {
+  outline: 2px solid rgba(0, 255, 178, 0.35);
+  outline-offset: 2px;
+}
+
+.btn-brand-solid:disabled {
+  box-shadow: none;
+}
+
+.btn-brand-soft {
+  background: var(--brand-button-soft-bg);
+  color: var(--brand-button-soft-text);
+  border: 1px solid var(--brand-button-soft-border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  transition:
+    transform var(--transition),
+    background-color var(--transition),
+    border-color var(--transition),
+    color var(--transition);
+}
+
+.btn-brand-soft:hover:not(:disabled) {
+  background: var(--brand-button-soft-bg-hover);
+  border-color: rgba(0, 255, 178, 0.4);
+  transform: translateY(-1px);
+}
+
 /* Card glass */
 .card-glass {
   background: rgba(255, 255, 255, 0.03);
@@ -144,12 +200,126 @@ body {
   }
 }
 
+@keyframes shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pulse-border {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(0, 255, 178, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(0, 255, 178, 0.1);
+  }
+}
+
+@keyframes hero-grid-drift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-88px, -44px, 0);
+  }
+}
+
+@keyframes hero-ticker-slide {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  100% {
+    transform: translate3d(-50%, 0, 0);
+  }
+}
+
+@keyframes hero-float-slow {
+  0%, 100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -16px, 0);
+  }
+}
+
+@keyframes hero-dash {
+  0% {
+    stroke-dashoffset: 0;
+  }
+  100% {
+    stroke-dashoffset: -160;
+  }
+}
+
+@keyframes hero-pulse-ring {
+  0%, 100% {
+    opacity: 0.25;
+    transform: translate(-50%, -50%) scale(1);
+  }
+  50% {
+    opacity: 0.68;
+    transform: translate(-50%, -50%) scale(1.035);
+  }
+}
+
 .animate-float {
   animation: float 6s ease-in-out infinite;
 }
 
 .animate-pulse-glow {
   animation: pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-shimmer {
+  animation: shimmer 2s infinite;
+}
+
+.animate-pulse-border {
+  animation: pulse-border 1s ease-out;
+}
+
+.hero-grid-pan {
+  animation: hero-grid-drift 18s linear infinite;
+}
+
+.hero-ticker {
+  animation: hero-ticker-slide 20s linear infinite;
+}
+
+.hero-ticker-reverse {
+  animation-direction: reverse;
+  animation-duration: 24s;
+}
+
+.hero-float-slow {
+  animation: hero-float-slow 9s ease-in-out infinite;
+}
+
+.hero-dash-path {
+  stroke-dasharray: 18 14;
+  animation: hero-dash 8.5s linear infinite;
+}
+
+.hero-pulse-ring {
+  animation: hero-pulse-ring 7s ease-in-out infinite;
+}
+
+/* Gradient utilities */
+.bg-gradient-radial {
+  background: radial-gradient(circle, var(--tw-gradient-stops));
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-grid-pan,
+  .hero-ticker,
+  .hero-float-slow,
+  .hero-dash-path,
+  .hero-pulse-ring {
+    animation: none !important;
+  }
 }
 
 /* Ensure WalletConnect modal appears above custom modals */

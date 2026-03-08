@@ -5,11 +5,13 @@ import { TransactionSyncService } from '../services/transactionSync.service';
 import { ExchangeService } from '../services/exchange.service';
 import { PriceFetchingService } from '../services/priceFetching.service';
 import { CostBasisCalculator } from '../services/costBasisCalculator';
+import { EtherscanService } from '../services/etherscanService';
 
 // Initialize services
 const priceService = new PriceFetchingService();
 const costBasisCalculator = new CostBasisCalculator(prisma);
-const syncService = new TransactionSyncService(prisma, priceService, costBasisCalculator);
+const etherscanService = new EtherscanService();
+const syncService = new TransactionSyncService(prisma, priceService, costBasisCalculator, etherscanService);
 const exchangeService = new ExchangeService();
 
 /**
@@ -20,20 +22,23 @@ const exchangeService = new ExchangeService();
 export const syncTransactions = async (req: AuthRequest, res: Response) => {
     try {
         const userId = req.userId!;
-        
+
         console.log(`🔄 Starting transaction sync for user ${userId}...`);
-        
+
         // Parse optional wallet filter
-        const walletAddresses = req.body.walletAddresses as string[] | undefined;
+        const walletAddressesInput = req.body.walletAddresses as string[] | undefined;
+        let walletAddresses: string[] | undefined;
 
         // Validate wallet addresses if provided
-        if (walletAddresses) {
-            if (!Array.isArray(walletAddresses)) {
+        if (walletAddressesInput !== undefined) {
+            if (!Array.isArray(walletAddressesInput)) {
                 return res.status(400).json({
                     error: 'Invalid walletAddresses format',
                     details: 'walletAddresses must be an array of strings',
                 });
             }
+
+            walletAddresses = [...new Set(walletAddressesInput.map((address) => address.toLowerCase()))];
 
             // Verify all wallets belong to the user
             const userWallets = await prisma.wallet.findMany({
@@ -66,11 +71,11 @@ export const syncTransactions = async (req: AuthRequest, res: Response) => {
         console.log('💱 Syncing exchange trade history...');
         let exchangeTradesCount = 0;
         const exchangeErrors: { exchangeId: string; error: string }[] = [];
-        
+
         try {
             // Get all user's exchange accounts
             const exchangeAccounts = await prisma.exchangeAccount.findMany({
-                where: { userId },
+                where: { userId, isActive: true },
                 select: { id: true, provider: true, nickname: true },
             });
 
@@ -79,15 +84,20 @@ export const syncTransactions = async (req: AuthRequest, res: Response) => {
             // Sync trade history for each exchange
             for (const account of exchangeAccounts) {
                 try {
-                    console.log(`🔄 Syncing trades for ${account.nickname || account.provider}...`);
-                    await exchangeService.syncTradeHistory(account.id);
-                    
-                    // Count new trades
-                    const trades = await prisma.exchangeTrade.findMany({
+                    // Snapshot count before sync so we can diff against it after
+                    const beforeCount = await prisma.exchangeTrade.count({
                         where: { exchangeAccountId: account.id },
                     });
-                    exchangeTradesCount += trades.length;
-                    console.log(`✅ Synced ${trades.length} trades from ${account.nickname || account.provider}`);
+
+                    await exchangeService.syncTradeHistory(account.id);
+
+                    const afterCount = await prisma.exchangeTrade.count({
+                        where: { exchangeAccountId: account.id },
+                    });
+
+                    const newTrades = afterCount - beforeCount;
+                    exchangeTradesCount += newTrades;
+                    console.log(`✅ Synced ${newTrades} new trades from ${account.nickname || account.provider}`);
                 } catch (error: any) {
                     console.error(`❌ Failed to sync ${account.nickname || account.provider}:`, error);
                     exchangeErrors.push({

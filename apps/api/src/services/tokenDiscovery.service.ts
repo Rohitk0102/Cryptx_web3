@@ -20,6 +20,16 @@ export interface DiscoveredTokens {
  * Covalent API for comprehensive token discovery
  */
 const COVALENT_API = 'https://api.covalenthq.com/v1';
+const missingApiKeyWarnings = new Set<string>();
+
+function warnMissingApiKeyOnce(service: string, message: string) {
+    if (missingApiKeyWarnings.has(service)) {
+        return;
+    }
+
+    missingApiKeyWarnings.add(service);
+    console.warn(message);
+}
 
 /**
  * Get API keys for token discovery services
@@ -42,7 +52,7 @@ async function discoverTokensWithCovalent(
 ): Promise<TokenInfo[]> {
     const apiKey = getApiKeys().covalent;
     if (!apiKey) {
-        console.warn('Covalent API key not found, skipping Covalent discovery');
+        warnMissingApiKeyOnce('covalent', 'Covalent API key not found, skipping Covalent discovery');
         return [];
     }
 
@@ -97,7 +107,7 @@ async function discoverTokensWithMoralis(
 ): Promise<TokenInfo[]> {
     const apiKey = getApiKeys().moralis;
     if (!apiKey) {
-        console.warn('Moralis API key not found, skipping Moralis discovery');
+        warnMissingApiKeyOnce('moralis', 'Moralis API key not found, skipping Moralis discovery');
         return [];
     }
 
@@ -185,19 +195,26 @@ async function discoverPopularTokens(
     };
 
     const chainTokens = popularTokens[chain as keyof typeof popularTokens] || [];
-    const provider = new ethers.JsonRpcProvider(SUPPORTED_CHAINS[chain].rpcUrl);
+    
+    // Use the retryable provider from blockchain service instead of creating a new one
+    const { getProvider } = await import('./blockchain.service');
+    const provider = getProvider(chain);
     
     const tokens: TokenInfo[] = [];
     
     for (const tokenInfo of chainTokens) {
         try {
-            const contract = new ethers.Contract(
-                tokenInfo.address,
-                ['function balanceOf(address) view returns (uint256)'],
-                provider
+            const balance = await provider.executeWithRetry(
+                () => {
+                    const contract = new ethers.Contract(
+                        tokenInfo.address,
+                        ['function balanceOf(address) view returns (uint256)'],
+                        provider.getProvider()
+                    );
+                    return contract.balanceOf(address);
+                },
+                `discoverPopularToken:${chain}:${tokenInfo.symbol}:balanceOf`
             );
-            
-            const balance = await contract.balanceOf(address);
             const balanceFormatted = ethers.formatUnits(balance, tokenInfo.decimals);
             
             if (parseFloat(balanceFormatted) > 0) {
@@ -208,6 +225,7 @@ async function discoverPopularTokens(
             }
         } catch (error) {
             // Skip tokens that fail
+            console.warn(`Failed to check balance for ${tokenInfo.symbol} on ${chain}:`, error);
             continue;
         }
     }
@@ -222,6 +240,12 @@ export async function discoverTokens(
     chain: string,
     address: string
 ): Promise<TokenInfo[]> {
+    const chainConfig = SUPPORTED_CHAINS[chain];
+    if (!chainConfig) {
+        console.warn(`Token discovery requested for unsupported chain: ${chain}`);
+        return [];
+    }
+
     const cacheKey = `discovered_tokens:${chain}:${address}`;
     
     // Check cache first (5 minutes)
@@ -231,7 +255,7 @@ export async function discoverTokens(
     }
 
     let allTokens: TokenInfo[] = [];
-    const chainId = SUPPORTED_CHAINS[chain].chainId;
+    const chainId = chainConfig.chainId;
 
     // Try multiple discovery methods in parallel
     try {

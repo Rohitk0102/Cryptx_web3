@@ -88,7 +88,7 @@ export interface PriceProvider {
 export interface ChainConfig {
   chainId: number;
   name: string;
-  rpcUrl: string;
+  rpcUrls: string[];
   nativeCurrency: {
     name: string;
     symbol: string;

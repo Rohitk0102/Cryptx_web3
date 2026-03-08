@@ -1,8 +1,10 @@
 import { useAuth, useUser } from '@clerk/nextjs';
-import { useCallback, useMemo } from 'react';
-import axios, { AxiosInstance } from 'axios';
+import axios, { type AxiosRequestConfig, type Method } from 'axios';
+import { API_BASE_URL } from '@/lib/apiConfig';
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001/api';
+type ApiRequestConfig = Omit<AxiosRequestConfig, 'data' | 'headers' | 'method' | 'url'> & {
+    headers?: Record<string, string>;
+};
 
 /**
  * Hook that provides an authenticated API client using Clerk tokens
@@ -10,53 +12,54 @@ const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5001/a
 export function useApiClient() {
     const { getToken } = useAuth();
     const { user } = useUser();
+    const clerkUserId = user?.id;
 
-    const apiRequest = useCallback(async <T = any>(
-        method: 'get' | 'post' | 'put' | 'patch' | 'delete',
+    const apiRequest = async <T = unknown>(
+        method: Method,
         url: string,
-        data?: any,
-        config?: any
+        data?: unknown,
+        config: ApiRequestConfig = {}
     ): Promise<T> => {
         const token = await getToken();
-        
+
         const headers: Record<string, string> = {
             'Content-Type': 'application/json',
             ...(config?.headers || {}),
         };
-        
+
         if (token) {
             headers['Authorization'] = `Bearer ${token}`;
         }
-        
-        if (user?.id) {
-            headers['X-Clerk-User-Id'] = user.id;
+
+        if (clerkUserId) {
+            headers['X-Clerk-User-Id'] = clerkUserId;
         }
 
-        const response = await axios({
+        const response = await axios<T>({
             method,
             url: `${API_BASE_URL}${url}`,
             data,
-            headers,
             ...config,
+            headers,
         });
 
         return response.data;
-    }, [getToken, user?.id]);
+    };
 
-    const get = useCallback(<T = any>(url: string, config?: any) => 
-        apiRequest<T>('get', url, undefined, config), [apiRequest]);
+    const get = <T = unknown>(url: string, config?: ApiRequestConfig) =>
+        apiRequest<T>('get', url, undefined, config);
 
-    const post = useCallback(<T = any>(url: string, data?: any, config?: any) => 
-        apiRequest<T>('post', url, data, config), [apiRequest]);
+    const post = <T = unknown>(url: string, data?: unknown, config?: ApiRequestConfig) =>
+        apiRequest<T>('post', url, data, config);
 
-    const put = useCallback(<T = any>(url: string, data?: any, config?: any) => 
-        apiRequest<T>('put', url, data, config), [apiRequest]);
+    const put = <T = unknown>(url: string, data?: unknown, config?: ApiRequestConfig) =>
+        apiRequest<T>('put', url, data, config);
 
-    const patch = useCallback(<T = any>(url: string, data?: any, config?: any) => 
-        apiRequest<T>('patch', url, data, config), [apiRequest]);
+    const patch = <T = unknown>(url: string, data?: unknown, config?: ApiRequestConfig) =>
+        apiRequest<T>('patch', url, data, config);
 
-    const del = useCallback(<T = any>(url: string, config?: any) => 
-        apiRequest<T>('delete', url, undefined, config), [apiRequest]);
+    const del = <T = unknown>(url: string, config?: ApiRequestConfig) =>
+        apiRequest<T>('delete', url, undefined, config);
 
     return {
         get,

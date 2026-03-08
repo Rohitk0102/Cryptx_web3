@@ -33,8 +33,12 @@ export interface AssetSummary {
 export interface PortfolioData {
     totalValueUsd: number;
     totalInvestedUsd?: number;
+    totalRealizedPnL?: number;
+    totalUnrealizedPnL?: number;
     totalPnL?: number;
     totalPnLPercentage?: number;
+    pnlStatus?: 'complete' | 'incomplete';
+    pnlNotice?: string;
     change24h?: number;
     change7d?: number;
     change30d?: number;
@@ -64,10 +68,17 @@ export interface PortfolioData {
     lastUpdated: Date;
 }
 
+export interface AggregatePortfolioOptions {
+    exchangePriceUsdBySymbol?: Record<string, number>;
+}
+
 /**
  * Aggregate exchange balances for a user
  */
-async function aggregateExchangeBalances(userId: string) {
+async function aggregateExchangeBalances(
+    userId: string,
+    options: AggregatePortfolioOptions = {}
+) {
     console.log(`📊 Aggregating exchange balances for user ${userId}...`);
 
     // Get all exchange accounts with balances
@@ -91,9 +102,11 @@ async function aggregateExchangeBalances(userId: string) {
         const balancesWithValue = [];
 
         for (const balance of account.balances) {
-            // Get price for the asset
-            const price = await getTokenPrice(balance.symbol);
-            const valueUsd = price 
+            const overridePriceUsd = options.exchangePriceUsdBySymbol?.[balance.symbol.toUpperCase()];
+            const price = overridePriceUsd !== undefined
+                ? { priceUsd: overridePriceUsd }
+                : await getTokenPrice(balance.symbol);
+            const valueUsd = price
                 ? calculateUsdValue(balance.balance, price.priceUsd)
                 : 0;
 
@@ -147,13 +160,20 @@ async function aggregateExchangeBalances(userId: string) {
  * Aggregate portfolio for a user
  */
 export async function aggregatePortfolio(userId: string): Promise<PortfolioData> {
+    return aggregatePortfolioWithOptions(userId);
+}
+
+export async function aggregatePortfolioWithOptions(
+    userId: string,
+    options: AggregatePortfolioOptions = {}
+): Promise<PortfolioData> {
     // Get all user wallets
     const wallets = await prisma.wallet.findMany({
         where: { userId, isActive: true },
     });
 
     // Get exchange balances
-    const { exchangeData, assetMap: exchangeAssetMap } = await aggregateExchangeBalances(userId);
+    const { exchangeData, assetMap: exchangeAssetMap } = await aggregateExchangeBalances(userId, options);
 
     if (wallets.length === 0 && exchangeData.length === 0) {
         return {
@@ -170,104 +190,115 @@ export async function aggregatePortfolio(userId: string): Promise<PortfolioData>
 
     // Process wallet balances
     for (const wallet of wallets) {
-        // Validate and sanitize chain types
-        const chainValidation = validateWalletChainTypes(wallet.chainTypes);
-        if (!chainValidation.isValid) {
-            console.warn(`Invalid chain types for wallet ${wallet.address}:`, chainValidation.errors);
-            // Skip this wallet or use only valid chains
-            continue;
-        }
+        try {
+            // Validate and sanitize chain types
+            const chainValidation = validateWalletChainTypes(wallet.chainTypes);
+            const sanitizedChains = sanitizeChainTypes(wallet.chainTypes);
 
-        const sanitizedChains = sanitizeChainTypes(wallet.chainTypes);
-        
-        // Fetch balances for this wallet (token discovery is now integrated)
-        const chainBalances = await getMultiChainBalances(
-            wallet.address,
-            sanitizedChains
-        );
-
-        let walletTotalUsd = 0;
-
-        // Calculate USD values
-        for (const chainBalance of chainBalances) {
-            // Native token
-            const nativePrice = await getTokenPrice(chainBalance.nativeBalance.symbol);
-            if (nativePrice) {
-                const valueUsd = calculateUsdValue(
-                    chainBalance.nativeBalance.balance,
-                    nativePrice.priceUsd
-                );
-                chainBalance.nativeBalance.valueUsd = valueUsd;
-                walletTotalUsd += valueUsd;
-
-                // Add to asset map
-                const symbol = chainBalance.nativeBalance.symbol;
-                if (!assetMap.has(symbol)) {
-                    assetMap.set(symbol, {
-                        symbol,
-                        name: chainBalance.nativeBalance.name,
-                        totalBalance: '0',
-                        valueUsd: 0,
-                        chains: [],
-                        exchanges: [],
-                    });
-                }
-                const asset = assetMap.get(symbol)!;
-                asset.totalBalance = (
-                    parseFloat(asset.totalBalance) +
-                    parseFloat(chainBalance.nativeBalance.balance)
-                ).toString();
-                asset.valueUsd += valueUsd;
-                asset.chains.push({
-                    chain: chainBalance.chain,
-                    balance: chainBalance.nativeBalance.balance,
-                    valueUsd,
-                });
+            if (!chainValidation.isValid) {
+                console.warn(`Invalid chain types for wallet ${wallet.address}:`, chainValidation.errors);
             }
 
-            // ERC-20 tokens
-            for (const token of chainBalance.tokens) {
-                const tokenPrice = await getTokenPrice(token.symbol);
-                if (tokenPrice) {
-                    const valueUsd = calculateUsdValue(token.balance, tokenPrice.priceUsd);
-                    token.valueUsd = valueUsd;
+            if (sanitizedChains.length === 0) {
+                console.warn(`Skipping wallet ${wallet.address} because it has no supported chain types`);
+                continue;
+            }
+
+            // Fetch balances for this wallet (token discovery is now integrated)
+            const chainBalances = await getMultiChainBalances(
+                wallet.address,
+                sanitizedChains
+            );
+
+            let walletTotalUsd = 0;
+
+            // Calculate USD values
+            for (const chainBalance of chainBalances) {
+                let chainTotalUsd = 0;
+
+                // Native token
+                const nativePrice = await getTokenPrice(chainBalance.nativeBalance.symbol);
+                if (nativePrice) {
+                    const valueUsd = calculateUsdValue(
+                        chainBalance.nativeBalance.balance,
+                        nativePrice.priceUsd
+                    );
+                    chainBalance.nativeBalance.valueUsd = valueUsd;
+                    chainTotalUsd += valueUsd;
                     walletTotalUsd += valueUsd;
 
                     // Add to asset map
-                    if (!assetMap.has(token.symbol)) {
-                        assetMap.set(token.symbol, {
-                            symbol: token.symbol,
-                            name: token.name,
+                    const symbol = chainBalance.nativeBalance.symbol;
+                    if (!assetMap.has(symbol)) {
+                        assetMap.set(symbol, {
+                            symbol,
+                            name: chainBalance.nativeBalance.name,
                             totalBalance: '0',
                             valueUsd: 0,
                             chains: [],
                             exchanges: [],
                         });
                     }
-                    const asset = assetMap.get(token.symbol)!;
+                    const asset = assetMap.get(symbol)!;
                     asset.totalBalance = (
-                        parseFloat(asset.totalBalance) + parseFloat(token.balance)
+                        parseFloat(asset.totalBalance) +
+                        parseFloat(chainBalance.nativeBalance.balance)
                     ).toString();
                     asset.valueUsd += valueUsd;
                     asset.chains.push({
                         chain: chainBalance.chain,
-                        balance: token.balance,
+                        balance: chainBalance.nativeBalance.balance,
                         valueUsd,
                     });
                 }
+
+                // ERC-20 tokens
+                for (const token of chainBalance.tokens) {
+                    const tokenPrice = await getTokenPrice(token.symbol);
+                    if (tokenPrice) {
+                        const valueUsd = calculateUsdValue(token.balance, tokenPrice.priceUsd);
+                        token.valueUsd = valueUsd;
+                        chainTotalUsd += valueUsd;
+                        walletTotalUsd += valueUsd;
+
+                        // Add to asset map
+                        if (!assetMap.has(token.symbol)) {
+                            assetMap.set(token.symbol, {
+                                symbol: token.symbol,
+                                name: token.name,
+                                totalBalance: '0',
+                                valueUsd: 0,
+                                chains: [],
+                                exchanges: [],
+                            });
+                        }
+                        const asset = assetMap.get(token.symbol)!;
+                        asset.totalBalance = (
+                            parseFloat(asset.totalBalance) + parseFloat(token.balance)
+                        ).toString();
+                        asset.valueUsd += valueUsd;
+                        asset.chains.push({
+                            chain: chainBalance.chain,
+                            balance: token.balance,
+                            valueUsd,
+                        });
+                    }
+                }
+
+                chainBalance.totalValueUsd = chainTotalUsd;
             }
 
-            chainBalance.totalValueUsd = walletTotalUsd;
+            walletData.push({
+                id: wallet.id,
+                address: wallet.address,
+                nickname: wallet.nickname || undefined,
+                provider: wallet.provider || undefined,
+                valueUsd: walletTotalUsd,
+                chains: chainBalances,
+            });
+        } catch (error) {
+            console.error(`Failed to aggregate wallet ${wallet.address}:`, error);
         }
-
-        walletData.push({
-            id: wallet.id,
-            address: wallet.address,
-            nickname: wallet.nickname || undefined,
-            provider: wallet.provider || undefined,
-            valueUsd: walletTotalUsd,
-            chains: chainBalances,
-        });
     }
 
     // Merge exchange assets into the asset map
@@ -287,7 +318,7 @@ export async function aggregatePortfolio(userId: string): Promise<PortfolioData>
                 parseFloat(asset.totalBalance) + exchangeAsset.totalBalance
             ).toString();
             asset.valueUsd += exchangeAsset.totalValueUsd;
-            asset.exchanges = exchangeAsset.exchanges;
+            asset.exchanges = [...(asset.exchanges || []), ...exchangeAsset.exchanges];
         }
     }
 
@@ -307,9 +338,13 @@ export async function aggregatePortfolio(userId: string): Promise<PortfolioData>
     );
 
     // Calculate PNL data
-    let totalInvestedUsd = 0;
-    let totalPnL = 0;
-    let totalPnLPercentage = 0;
+    let totalInvestedUsd: number | undefined = 0;
+    let totalRealizedPnL: number | undefined = 0;
+    let totalUnrealizedPnL: number | undefined = 0;
+    let totalPnL: number | undefined = 0;
+    let totalPnLPercentage: number | undefined = 0;
+    let pnlStatus: 'complete' | 'incomplete' = 'complete';
+    let pnlNotice: string | undefined;
 
     try {
         console.log(`💰 Calculating PNL for user ${userId}...`);
@@ -332,22 +367,60 @@ export async function aggregatePortfolio(userId: string): Promise<PortfolioData>
             return sum + parseFloat(token.costBasis.toString());
         }, 0);
 
+        totalRealizedPnL = parseFloat(pnlSummary.totalRealizedPnL.toString());
+        totalUnrealizedPnL = parseFloat(pnlSummary.totalUnrealizedPnL.toString());
+
         // Get total PNL
         totalPnL = parseFloat(pnlSummary.totalPnL.toString());
 
         // Calculate PNL percentage
-        if (totalInvestedUsd > 0) {
+        if ((totalInvestedUsd ?? 0) > 0 && totalPnL !== undefined) {
             totalPnLPercentage = (totalPnL / totalInvestedUsd) * 100;
         }
         
         console.log(`💰 PNL Calculation Results:`, {
             totalInvestedUsd,
+            totalRealizedPnL,
+            totalUnrealizedPnL,
             totalPnL,
             totalPnLPercentage
         });
     } catch (error) {
         console.error('❌ Error calculating PNL for portfolio:', error);
         // Continue without PNL data if calculation fails
+    }
+
+    if (exchangeData.length > 0) {
+        const exchangeWalletAddresses = exchangeData.map(exchange => `exchange:${exchange.id}`);
+        const [placeholderExchangeTxCount, realExchangeTxCount] = await Promise.all([
+            prisma.pnLTransaction.count({
+                where: {
+                    userId,
+                    walletAddress: { in: exchangeWalletAddresses },
+                    source: 'coindcx:initial_balance',
+                },
+            }),
+            prisma.pnLTransaction.count({
+                where: {
+                    userId,
+                    walletAddress: { in: exchangeWalletAddresses },
+                    source: { not: 'coindcx:initial_balance' },
+                },
+            }),
+        ]);
+
+        if (placeholderExchangeTxCount > 0) {
+            pnlStatus = 'incomplete';
+            pnlNotice = realExchangeTxCount === 0
+                ? 'CoinDCX returned live balances but no historical trade data for this account. Current value is live, but invested and P&L cannot be matched yet.'
+                : 'CoinDCX trade history is only partially available for this account. Current value is live, but invested and P&L are incomplete.';
+
+            totalInvestedUsd = undefined;
+            totalRealizedPnL = undefined;
+            totalUnrealizedPnL = undefined;
+            totalPnL = undefined;
+            totalPnLPercentage = undefined;
+        }
     }
 
     // Calculate historical portfolio values using real price data
@@ -377,8 +450,12 @@ export async function aggregatePortfolio(userId: string): Promise<PortfolioData>
     return {
         totalValueUsd,
         totalInvestedUsd,
+        totalRealizedPnL,
+        totalUnrealizedPnL,
         totalPnL,
         totalPnLPercentage,
+        pnlStatus,
+        pnlNotice,
         change24h,
         change7d,
         change30d,
@@ -401,117 +478,55 @@ async function calculateHistoricalPortfolioValues(assets: AssetSummary[]): Promi
     let value7dAgo = 0;
     let value30dAgo = 0;
 
-    // Map common symbols to CoinGecko IDs
-    const symbolToCoinGeckoId: Record<string, string> = {
-        'BTC': 'bitcoin',
-        'ETH': 'ethereum',
-        'USDT': 'tether',
-        'USDC': 'usd-coin',
-        'BNB': 'binancecoin',
-        'MATIC': 'matic-network',
-        'POL': 'matic-network',
-        'SOL': 'solana',
-        'ADA': 'cardano',
-        'DOT': 'polkadot',
-        'AVAX': 'avalanche-2',
-        'LINK': 'chainlink',
-        'UNI': 'uniswap',
-        'AAVE': 'aave',
-        'SHIB': 'shiba-inu',
-        'DAI': 'dai',
+    const referenceTimes = {
+        value24hAgo: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        value7dAgo: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
+        value30dAgo: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
     };
 
-    for (const asset of assets) {
-        const coinId = symbolToCoinGeckoId[asset.symbol.toUpperCase()];
-        if (!coinId) {
-            console.warn(`No CoinGecko ID mapping for ${asset.symbol}, skipping historical calculation`);
-            continue;
-        }
-
-        try {
-            // Fetch historical market data from CoinGecko
-            // This gives us price data for the last 30 days
-            const response = await fetch(
-                `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=30&interval=daily`
-            );
-
-            if (!response.ok) {
-                console.warn(`Failed to fetch historical data for ${asset.symbol}`);
-                continue;
-            }
-
-            const data = await response.json() as { prices: [number, number][] };
-            const prices = data.prices; // Array of [timestamp, price]
-
-            if (!prices || prices.length === 0) {
-                continue;
-            }
-
-            // Get prices at specific time points
-            const now = Date.now();
-            const oneDayAgo = now - 24 * 60 * 60 * 1000;
-            const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
-            const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
-
-            // Find closest price data points
-            const price24h = findClosestPrice(prices, oneDayAgo);
-            const price7d = findClosestPrice(prices, sevenDaysAgo);
-            const price30d = findClosestPrice(prices, thirtyDaysAgo);
-
-            // Calculate value for this asset at each time point
+    await Promise.all(
+        assets.map(async (asset) => {
             const assetBalance = parseFloat(asset.totalBalance);
-            
-            if (price24h) {
-                value24hAgo += assetBalance * price24h;
-            }
-            if (price7d) {
-                value7dAgo += assetBalance * price7d;
-            }
-            if (price30d) {
-                value30dAgo += assetBalance * price30d;
+            if (!Number.isFinite(assetBalance) || assetBalance <= 0) {
+                return;
             }
 
-            // Add small delay to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 100));
-        } catch (error) {
-            console.error(`Error fetching historical data for ${asset.symbol}:`, error);
-        }
-    }
+            try {
+                const [price24h, price7d, price30d] = await Promise.all([
+                    priceService.getHistoricalPrice(asset.symbol, referenceTimes.value24hAgo),
+                    priceService.getHistoricalPrice(asset.symbol, referenceTimes.value7dAgo),
+                    priceService.getHistoricalPrice(asset.symbol, referenceTimes.value30dAgo),
+                ]);
+
+                if (price24h) {
+                    value24hAgo += assetBalance * price24h.toNumber();
+                }
+                if (price7d) {
+                    value7dAgo += assetBalance * price7d.toNumber();
+                }
+                if (price30d) {
+                    value30dAgo += assetBalance * price30d.toNumber();
+                }
+            } catch (error) {
+                console.error(`Error fetching historical data for ${asset.symbol}:`, error);
+            }
+        })
+    );
 
     return { value24hAgo, value7dAgo, value30dAgo };
 }
 
 /**
- * Find the closest price to a target timestamp
- */
-function findClosestPrice(prices: [number, number][], targetTimestamp: number): number | null {
-    if (!prices || prices.length === 0) return null;
-
-    let closest = prices[0];
-    let minDiff = Math.abs(prices[0][0] - targetTimestamp);
-
-    for (const [timestamp, price] of prices) {
-        const diff = Math.abs(timestamp - targetTimestamp);
-        if (diff < minDiff) {
-            minDiff = diff;
-            closest = [timestamp, price];
-        }
-    }
-
-    return closest[1];
-}
-
-/**
  * Generate and save portfolio snapshot
  */
-export async function generateSnapshot(userId: string): Promise<void> {
-    const portfolio = await aggregatePortfolio(userId);
+export async function generateSnapshot(userId: string, portfolio?: PortfolioData): Promise<void> {
+    const snapshotData = portfolio || await aggregatePortfolioWithOptions(userId);
 
     await prisma.portfolioSnapshot.create({
         data: {
             userId,
-            totalValueUsd: portfolio.totalValueUsd,
-            breakdown: portfolio as any,
+            totalValueUsd: snapshotData.totalValueUsd,
+            breakdown: snapshotData as any,
         },
     });
 }

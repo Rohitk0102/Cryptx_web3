@@ -1,14 +1,38 @@
 'use client';
 
-import { useEffect, useState, useCallback, useMemo } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useState } from 'react';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
-import { coinGeckoApi, TokenPrice, POPULAR_TOKENS } from '@/lib/coinGeckoApi';
+import { coinGeckoApi, TokenPrice } from '@/lib/coinGeckoApi';
 import { Card } from '@/components/ui/Card';
-import { formatUSDAsINR, usdToInr } from '@/lib/currency';
+import { usdToInr } from '@/lib/currency';
 
 interface TokenWithBalance extends TokenPrice {
     balance?: number;
     valueUsd?: number;
+}
+
+type TrackingFilter = 'all' | 'gainers' | 'losers';
+
+interface TokenCardProps {
+    token: TokenWithBalance;
+    formatPrice: (price: number) => string;
+    formatPercentage: (percentage: number) => string;
+    onClick: () => void;
+}
+
+const DEFAULT_TOKEN_LIMIT = 50;
+
+function get24hChange(token: TokenWithBalance): number {
+    return Number.isFinite(token.price_change_percentage_24h)
+        ? token.price_change_percentage_24h
+        : 0;
+}
+
+function get7dChange(token: TokenWithBalance): number {
+    return Number.isFinite(token.price_change_percentage_7d)
+        ? token.price_change_percentage_7d
+        : 0;
 }
 
 // Cache for token data
@@ -20,7 +44,7 @@ export default function RealTimeTracking() {
     const [tokens, setTokens] = useState<TokenWithBalance[]>([]);
     const [loading, setLoading] = useState(true);
     const [lastUpdate, setLastUpdate] = useState<Date>(new Date());
-    const [filter, setFilter] = useState<'all' | 'gainers' | 'losers'>('all');
+    const [filter, setFilter] = useState<TrackingFilter>('all');
     const [searchQuery, setSearchQuery] = useState('');
 
     const loadTokens = useCallback(async (force = false) => {
@@ -33,7 +57,7 @@ export default function RealTimeTracking() {
                 return;
             }
 
-            const data = await coinGeckoApi.getPopularTokens();
+            const data = await coinGeckoApi.getPopularTokens(DEFAULT_TOKEN_LIMIT);
             const now = Date.now();
             tokenCache = { data, timestamp: now };
             setTokens(data);
@@ -54,7 +78,7 @@ export default function RealTimeTracking() {
     }, [loadTokens]);
 
     const filteredTokens = useMemo(() => {
-        return tokens.filter(token => {
+        const filtered = tokens.filter((token) => {
             // Search filter
             if (searchQuery) {
                 const query = searchQuery.toLowerCase();
@@ -66,12 +90,31 @@ export default function RealTimeTracking() {
 
             // Price change filter
             if (filter === 'gainers') {
-                return token.price_change_percentage_24h > 0;
+                return get24hChange(token) > 0;
             } else if (filter === 'losers') {
-                return token.price_change_percentage_24h < 0;
+                return get24hChange(token) < 0;
             }
 
             return true;
+        });
+
+        if (filter === 'gainers') {
+            return filtered.sort((a, b) => get24hChange(b) - get24hChange(a));
+        }
+
+        if (filter === 'losers') {
+            return filtered.sort((a, b) => get24hChange(a) - get24hChange(b));
+        }
+
+        return filtered.sort((a, b) => {
+            const marketCapRankA = a.market_cap_rank ?? Number.MAX_SAFE_INTEGER;
+            const marketCapRankB = b.market_cap_rank ?? Number.MAX_SAFE_INTEGER;
+
+            if (marketCapRankA !== marketCapRankB) {
+                return marketCapRankA - marketCapRankB;
+            }
+
+            return b.market_cap - a.market_cap;
         });
     }, [tokens, searchQuery, filter]);
 
@@ -109,7 +152,7 @@ export default function RealTimeTracking() {
                 <div>
                     <h2 className="text-2xl font-bold text-text-primary mb-1">Real-Time Token Tracking</h2>
                     <p className="text-sm text-text-secondary">
-                        Live prices • Updated {lastUpdate.toLocaleTimeString()}
+                        Top {tokens.length} market-cap tokens • Updated {lastUpdate.toLocaleTimeString()}
                     </p>
                 </div>
 
@@ -127,11 +170,11 @@ export default function RealTimeTracking() {
             </div>
 
             {/* Filters */}
-            <div className="flex gap-2">
+            <div className="flex flex-wrap items-center gap-2">
                 <button
                     onClick={() => setFilter('all')}
                     className={`px-4 py-2 rounded-[2px] text-sm font-medium transition ${filter === 'all'
-                            ? 'bg-accent text-white'
+                            ? 'border border-[#00FFB2]/35 bg-[#00FFB2]/12 text-[#D8FFF2] shadow-[0_0_16px_rgba(0,255,178,0.08)]'
                             : 'bg-surface text-text-secondary hover:bg-surface-elevated border border-border'
                         }`}
                 >
@@ -140,7 +183,7 @@ export default function RealTimeTracking() {
                 <button
                     onClick={() => setFilter('gainers')}
                     className={`px-4 py-2 rounded-[2px] text-sm font-medium transition ${filter === 'gainers'
-                            ? 'bg-success text-white border border-success'
+                            ? 'border border-[#00FFB2]/35 bg-[#00FFB2]/12 text-[#D8FFF2] shadow-[0_0_16px_rgba(0,255,178,0.08)]'
                             : 'bg-surface text-text-secondary hover:bg-surface-elevated border border-border'
                         }`}
                 >
@@ -149,12 +192,16 @@ export default function RealTimeTracking() {
                 <button
                     onClick={() => setFilter('losers')}
                     className={`px-4 py-2 rounded-[2px] text-sm font-medium transition ${filter === 'losers'
-                            ? 'bg-error text-white border border-error'
+                            ? 'border border-[#FF4C4C]/35 bg-[#FF4C4C]/12 text-[#FFB2B2] shadow-[0_0_16px_rgba(255,76,76,0.08)]'
                             : 'bg-surface text-text-secondary hover:bg-surface-elevated border border-border'
                         }`}
                 >
                     Losers
                 </button>
+
+                <div className="ml-auto text-xs text-text-secondary">
+                    Showing {filteredTokens.length} token{filteredTokens.length === 1 ? '' : 's'}
+                </div>
             </div>
 
             {/* Tokens Grid */}
@@ -171,7 +218,11 @@ export default function RealTimeTracking() {
 
                 {filteredTokens.length === 0 && (
                     <div className="text-center py-12 text-text-secondary">
-                        No tokens found matching your search.
+                        {filter === 'gainers'
+                            ? 'No gainers found for the current search.'
+                            : filter === 'losers'
+                                ? 'No losers found for the current search.'
+                                : 'No tokens found matching your search.'}
                     </div>
                 )}
             </div>
@@ -186,7 +237,16 @@ export default function RealTimeTracking() {
 }
 
 // Memoized Token Card Component
-const TokenCard = React.memo(({ token, formatPrice, formatPercentage, onClick }: any) => (
+const TokenCard = memo(function TokenCard({
+    token,
+    formatPrice,
+    formatPercentage,
+    onClick,
+}: TokenCardProps) {
+    const change24h = get24hChange(token);
+    const change7d = get7dChange(token);
+
+    return (
     <Card
         hover={true}
         onClick={onClick}
@@ -195,11 +255,13 @@ const TokenCard = React.memo(({ token, formatPrice, formatPercentage, onClick }:
         <div className="flex items-center justify-between">
             {/* Token Info */}
             <div className="flex items-center gap-4 flex-1">
-                <img
-                    src={token.image}
+                <Image
+                    src={token.image || '/globe.svg'}
                     alt={token.name}
-                    className="w-10 h-10 rounded-full"
-                    loading="lazy"
+                    width={40}
+                    height={40}
+                    className="h-10 w-10 rounded-full"
+                    unoptimized
                 />
                 <div className="flex-1">
                     <div className="flex items-center gap-2">
@@ -223,16 +285,16 @@ const TokenCard = React.memo(({ token, formatPrice, formatPercentage, onClick }:
                 </div>
                 <div className="flex items-center gap-3">
                     <div
-                        className={`text-sm font-medium ${token.price_change_percentage_24h >= 0
+                        className={`text-sm font-medium ${change24h >= 0
                                 ? 'text-success'
                                 : 'text-error'
                             }`}
                     >
-                        {formatPercentage(token.price_change_percentage_24h)}
+                        {formatPercentage(change24h)}
                     </div>
-                    {token.price_change_percentage_7d !== undefined && (
+                    {Number.isFinite(change7d) && (
                         <div className="text-xs text-text-secondary">
-                            7d: {formatPercentage(token.price_change_percentage_7d)}
+                            7d: {formatPercentage(change7d)}
                         </div>
                     )}
                 </div>
@@ -243,18 +305,16 @@ const TokenCard = React.memo(({ token, formatPrice, formatPercentage, onClick }:
                 <div className="ml-6 hidden lg:block">
                     <MiniSparkline
                         data={token.sparkline_in_7d.price}
-                        isPositive={token.price_change_percentage_7d >= 0}
+                        isPositive={change7d >= 0}
                     />
                 </div>
             )}
         </div>
     </Card>
-));
+    );
+});
 
 TokenCard.displayName = 'TokenCard';
-
-// Required React import for memo
-import React from 'react';
 
 // Mini sparkline component
 function MiniSparkline({ data, isPositive }: { data: number[]; isPositive: boolean }) {
@@ -262,7 +322,7 @@ function MiniSparkline({ data, isPositive }: { data: number[]; isPositive: boole
     const height = 40;
     const min = Math.min(...data);
     const max = Math.max(...data);
-    const range = max - min;
+    const range = max - min || 1;
 
     const points = data.map((value, index) => {
         const x = (index / (data.length - 1)) * width;

@@ -5,24 +5,65 @@ import crypto from 'crypto';
 import prisma from '../utils/prisma';
 import redis from '../utils/redis';
 
+const NONCE_TTL_SECONDS = 600;
+const fallbackNonceStore = new Map<string, number>();
+
+function pruneExpiredFallbackNonces(now = Date.now()) {
+    for (const [nonce, expiresAt] of fallbackNonceStore.entries()) {
+        if (expiresAt <= now) {
+            fallbackNonceStore.delete(nonce);
+        }
+    }
+}
+
+async function storeNonce(nonce: string): Promise<boolean> {
+    pruneExpiredFallbackNonces();
+
+    const redisResult = await redis.setex(`nonce:${nonce}`, NONCE_TTL_SECONDS, 'valid');
+    if (redisResult === 'OK') {
+        return true;
+    }
+
+    fallbackNonceStore.set(nonce, Date.now() + NONCE_TTL_SECONDS * 1000);
+    return true;
+}
+
+async function hasValidNonce(nonce: string): Promise<boolean> {
+    pruneExpiredFallbackNonces();
+
+    const redisNonce = await redis.get(`nonce:${nonce}`);
+    if (redisNonce) {
+        return true;
+    }
+
+    const fallbackExpiry = fallbackNonceStore.get(nonce);
+    if (!fallbackExpiry) {
+        return false;
+    }
+
+    if (fallbackExpiry <= Date.now()) {
+        fallbackNonceStore.delete(nonce);
+        return false;
+    }
+
+    return true;
+}
+
+async function consumeNonce(nonce: string): Promise<void> {
+    await redis.del(`nonce:${nonce}`);
+    fallbackNonceStore.delete(nonce);
+}
+
 export const getNonce = async (req: Request, res: Response) => {
     try {
         const nonce = crypto.randomBytes(16).toString('hex');
         console.log('🎲 Generated nonce:', nonce);
 
-        // Store nonce in Redis with 10 minute expiry
-        console.log(`💾 Storing nonce in Redis: nonce:${nonce}`);
-        const result = await redis.setex(`nonce:${nonce}`, 600, 'valid');
-        console.log('Redis setex result:', result);
-
-        if (result !== 'OK') {
-            console.error('❌ Failed to store nonce in Redis');
+        const stored = await storeNonce(nonce);
+        if (!stored) {
+            console.error('❌ Failed to store nonce');
             return res.status(500).json({ error: 'Failed to generate nonce' });
         }
-
-        // Verify it was stored
-        const verification = await redis.get(`nonce:${nonce}`);
-        console.log(`✅ Nonce verification:`, verification);
 
         res.json({ nonce });
     } catch (error) {
@@ -46,15 +87,10 @@ export const verifySignature = async (req: Request, res: Response) => {
         console.log('✅ SIWE message parsed, nonce:', siweMessage.nonce);
 
         // Verify nonce exists and is valid
-        console.log(`🔍 Checking nonce in Redis: nonce:${siweMessage.nonce}`);
-        const nonceValid = await redis.get(`nonce:${siweMessage.nonce}`);
-        console.log(`Redis nonce check result:`, nonceValid);
+        const nonceValid = await hasValidNonce(siweMessage.nonce);
 
         if (!nonceValid) {
             console.log('❌ Nonce not found or expired in Redis');
-            // Check if nonce exists at all
-            const allNonces = await redis.keys('nonce:*');
-            console.log('Available nonces in Redis:', allNonces);
             return res.status(401).json({ error: 'Invalid or expired nonce' });
         }
 
@@ -73,7 +109,7 @@ export const verifySignature = async (req: Request, res: Response) => {
 
         // Delete used nonce (prevent replay attacks)
         console.log(`🗑️  Deleting used nonce: nonce:${siweMessage.nonce}`);
-        await redis.del(`nonce:${siweMessage.nonce}`);
+        await consumeNonce(siweMessage.nonce);
 
         const address = siweMessage.address.toLowerCase();
         console.log('👤 Looking up user with address:', address);

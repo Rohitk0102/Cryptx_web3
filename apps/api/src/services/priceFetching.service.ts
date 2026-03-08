@@ -11,12 +11,86 @@
  * - 3.5: Cache historical prices to minimize external API calls
  */
 
+import axios from 'axios';
 import { Decimal } from '../utils/decimal';
 import { getTokenPriceWithFallback } from './priceServiceV2';
 import redis from '../utils/redis';
 
 const HISTORICAL_CACHE_TTL = 86400 * 30; // 30 days (historical prices don't change)
 const CURRENT_CACHE_TTL = 300; // 5 minutes (current prices change frequently)
+const COINGECKO_API_BASE = 'https://api.coingecko.com/api/v3';
+const CRYPTOCOMPARE_API_BASE = 'https://min-api.cryptocompare.com/data/v2';
+const STABLECOIN_SYMBOLS = new Set([
+  'USDT',
+  'USDC',
+  'DAI',
+  'BUSD',
+  'TUSD',
+  'USDP',
+  'FDUSD',
+  'PYUSD',
+  'USDE',
+  'USD',
+]);
+const historicalWarningCache = new Set<string>();
+
+function formatHistoricalDayKey(timestamp: Date): string {
+  return timestamp.toISOString().slice(0, 10);
+}
+
+function formatCoinGeckoDate(timestamp: Date): string {
+  const day = timestamp.getUTCDate().toString().padStart(2, '0');
+  const month = (timestamp.getUTCMonth() + 1).toString().padStart(2, '0');
+  const year = timestamp.getUTCFullYear().toString();
+  return `${day}-${month}-${year}`;
+}
+
+function getCoinGeckoId(symbol: string): string | null {
+  const mapping: Record<string, string> = {
+    AAVE: 'aave',
+    ADA: 'cardano',
+    AVAX: 'avalanche-2',
+    BNB: 'binancecoin',
+    BTC: 'bitcoin',
+    BUSD: 'binance-usd',
+    CAKE: 'pancakeswap-token',
+    CRV: 'curve-dao-token',
+    DAI: 'dai',
+    ETH: 'ethereum',
+    FDUSD: 'first-digital-usd',
+    LINK: 'chainlink',
+    MATIC: 'matic-network',
+    POL: 'matic-network',
+    PYUSD: 'paypal-usd',
+    SHIB: 'shiba-inu',
+    SOL: 'solana',
+    TUSD: 'true-usd',
+    UNI: 'uniswap',
+    USDC: 'usd-coin',
+    USDE: 'ethena-usde',
+    USDP: 'pax-dollar',
+    USDT: 'tether',
+    WBTC: 'wrapped-bitcoin',
+    WETH: 'weth',
+    WMATIC: 'wrapped-matic',
+  };
+
+  return mapping[symbol.toUpperCase()] || null;
+}
+
+function logHistoricalWarningOnce(key: string, message: string, error?: unknown): void {
+  if (historicalWarningCache.has(key)) {
+    return;
+  }
+
+  historicalWarningCache.add(key);
+  if (error) {
+    console.warn(message, error);
+    return;
+  }
+
+  console.warn(message);
+}
 
 export interface HistoricalPriceResult {
   price: Decimal;
@@ -44,7 +118,8 @@ export class PriceFetchingService {
     timestamp: Date
   ): Promise<Decimal | null> {
     const normalizedSymbol = tokenSymbol.toUpperCase();
-    const cacheKey = `historical:${normalizedSymbol}:${timestamp.toISOString()}`;
+    const dayKey = formatHistoricalDayKey(timestamp);
+    const cacheKey = `historical:${normalizedSymbol}:${dayKey}`;
 
     // Check in-memory cache first
     if (this.cache.has(cacheKey)) {
@@ -60,9 +135,6 @@ export class PriceFetchingService {
     }
 
     // Try to fetch exact historical price
-    // Note: The existing price service doesn't have historical price support yet
-    // For now, we'll use the current price as a placeholder
-    // In production, this would integrate with CoinGecko's historical API or similar
     const exactPrice = await this.fetchHistoricalPriceFromAPI(
       normalizedSymbol,
       timestamp
@@ -127,22 +199,131 @@ export class PriceFetchingService {
    */
   private async fetchHistoricalPriceFromAPI(
     tokenSymbol: string,
-    timestamp: Date
+    timestamp: Date,
+    allowCurrentPriceFallback = true
   ): Promise<Decimal | null> {
-    // TODO: Integrate with CoinGecko historical price API or similar
-    // For now, we'll use current price as a fallback
-    // This is a temporary implementation until historical API is integrated
-    
+    const normalizedSymbol = tokenSymbol.toUpperCase();
+
+    if (STABLECOIN_SYMBOLS.has(normalizedSymbol)) {
+      return new Decimal(1);
+    }
+
+    const providerFetchers = [
+      () => this.fetchHistoricalPriceFromCryptoCompare(normalizedSymbol, timestamp),
+      () => this.fetchHistoricalPriceFromCoinGecko(normalizedSymbol, timestamp),
+    ];
+
+    for (const fetcher of providerFetchers) {
+      const price = await fetcher();
+      if (price && price.greaterThan(0)) {
+        return price;
+      }
+    }
+
     // If the timestamp is very recent (within last hour), use current price
     const hourAgo = Date.now() - 60 * 60 * 1000;
-    if (timestamp.getTime() > hourAgo) {
+    if (allowCurrentPriceFallback && timestamp.getTime() > hourAgo) {
       const currentPrice = await this.getCurrentPrice(tokenSymbol);
       return currentPrice;
     }
 
-    // For older timestamps, we need actual historical data
-    // Return null to trigger fallback logic
     return null;
+  }
+
+  private async fetchHistoricalPriceFromCoinGecko(
+    tokenSymbol: string,
+    timestamp: Date
+  ): Promise<Decimal | null> {
+    const coinId = getCoinGeckoId(tokenSymbol);
+    if (!coinId) {
+      return null;
+    }
+
+    try {
+      const response = await axios.get(
+        `${COINGECKO_API_BASE}/coins/${coinId}/history`,
+        {
+          params: {
+            date: formatCoinGeckoDate(timestamp),
+            localization: false,
+          },
+          headers: process.env.COINGECKO_API_KEY
+            ? { 'x-cg-demo-api-key': process.env.COINGECKO_API_KEY }
+            : undefined,
+          timeout: 8000,
+        }
+      );
+
+      const price = response.data?.market_data?.current_price?.usd;
+      if (typeof price === 'number' && price > 0) {
+        return new Decimal(price);
+      }
+
+      return null;
+    } catch (error) {
+      logHistoricalWarningOnce(
+        `historical:coingecko:${tokenSymbol}`,
+        `CoinGecko historical price fetch failed for ${tokenSymbol}`,
+        error
+      );
+      return null;
+    }
+  }
+
+  private async fetchHistoricalPriceFromCryptoCompare(
+    tokenSymbol: string,
+    timestamp: Date
+  ): Promise<Decimal | null> {
+    try {
+      const toTs = Math.floor(timestamp.getTime() / 1000) + 86400;
+      const response = await axios.get(
+        `${CRYPTOCOMPARE_API_BASE}/histoday`,
+        {
+          params: {
+            fsym: tokenSymbol,
+            tsym: 'USD',
+            limit: 2,
+            toTs,
+          },
+          timeout: 8000,
+        }
+      );
+
+      const points = response.data?.Data?.Data;
+      if (!Array.isArray(points) || points.length === 0) {
+        return null;
+      }
+
+      const targetTime = timestamp.getTime();
+      let bestPoint: { time: number; close: number } | null = null;
+      let minDiff = Number.POSITIVE_INFINITY;
+
+      for (const point of points) {
+        if (typeof point?.time !== 'number' || typeof point?.close !== 'number' || point.close <= 0) {
+          continue;
+        }
+
+        const pointTimestamp = point.time * 1000;
+        const diff = Math.abs(pointTimestamp - targetTime);
+        if (diff < minDiff) {
+          bestPoint = point;
+          minDiff = diff;
+        }
+      }
+
+      if (bestPoint && minDiff <= 24 * 60 * 60 * 1000) {
+        return new Decimal(bestPoint.close);
+      }
+
+      return null;
+    } catch (error) {
+      logHistoricalWarningOnce(
+        `historical:cryptocompare:${tokenSymbol}`,
+        `CryptoCompare historical price fetch failed for ${tokenSymbol}`,
+        error
+      );
+      return null;
+    }
   }
 
   /**
@@ -163,19 +344,15 @@ export class PriceFetchingService {
     const startTime = targetTime - windowMs;
     const endTime = targetTime + windowMs;
 
-    // Try timestamps at 1-hour intervals within the window
+    // Historical endpoints used here are day-based, so search nearby days.
     const intervals = [
-      0, // exact time
-      1, -1, // ±1 hour
-      2, -2, // ±2 hours
-      4, -4, // ±4 hours
-      8, -8, // ±8 hours
-      12, -12, // ±12 hours
-      24, -24, // ±24 hours
+      0,
+      -1,
+      1,
     ];
 
-    for (const hourOffset of intervals) {
-      const checkTime = targetTime + hourOffset * 60 * 60 * 1000;
+    for (const dayOffset of intervals) {
+      const checkTime = targetTime + dayOffset * 24 * 60 * 60 * 1000;
       
       // Skip if outside the window
       if (checkTime < startTime || checkTime > endTime) {
@@ -185,13 +362,14 @@ export class PriceFetchingService {
       const checkTimestamp = new Date(checkTime);
       const price = await this.fetchHistoricalPriceFromAPI(
         tokenSymbol,
-        checkTimestamp
+        checkTimestamp,
+        false
       );
 
       if (price) {
         console.log(
           `Found fallback price for ${tokenSymbol} at ${checkTimestamp.toISOString()} ` +
-          `(${Math.abs(hourOffset)} hours from target)`
+          `(${Math.abs(dayOffset)} days from target)`
         );
         return price;
       }

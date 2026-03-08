@@ -1,4 +1,4 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import helmet from 'helmet';
@@ -6,18 +6,17 @@ import prisma from './utils/prisma';
 import redis from './utils/redis';
 import authRoutes from './routes/auth.routes';
 import walletRoutes from './routes/wallet.routes';
+import coindcxPortfolioRoutes from './routes/coindcxPortfolio.routes';
 import portfolioRoutes from './routes/portfolio.routes';
 import transactionRoutes from './routes/transaction.routes';
 import pnlRoutes from './routes/pnl.routes';
 import forecastingRoutes from './routes/forecasting.routes';
 import exchangeRoutes from './routes/exchange.routes';
-// Rate limiting disabled - imports commented out
-// import {
-//     applyRateLimits,
-//     getRateLimitStats,
-//     cleanupRateLimitData
-// } from './middleware/rateLimit';
+import { authenticate } from './middleware/auth';
+import { syncTransactions } from './controllers/sync.controller';
+import rateLimit from 'express-rate-limit';
 import { startSnapshotScheduler, stopSnapshotScheduler } from './services/snapshot.service';
+import { portfolioLiveService } from './services/portfolioLive.service';
 
 dotenv.config();
 
@@ -26,14 +25,81 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(helmet()); // Security headers
+const allowedOrigins = (process.env.FRONTEND_URL || 'http://localhost:3000')
+    .split(',')
+    .map((o) => o.trim())
+    .filter(Boolean);
+
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: (origin, callback) => {
+        // Allow server-to-server / non-browser requests (origin is undefined)
+        if (!origin || allowedOrigins.includes(origin)) {
+            callback(null, true);
+        } else {
+            callback(new Error(`CORS: origin ${origin} not allowed`));
+        }
+    },
     credentials: true,
 }));
 app.use(express.json());
 
-// Apply general rate limiting - DISABLED
-console.log('⚠️  Rate limiting disabled (all environments)');
+// ── Rate limiters ────────────────────────────────────────────────────────────
+
+const getRateLimitKey = (req: Request): string => {
+    const clerkUserId = req.header('X-Clerk-User-Id')?.trim();
+    if (clerkUserId) {
+        return `user:${clerkUserId}`;
+    }
+
+    return `ip:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+};
+
+const isWalletDeleteRequest = (req: Request): boolean =>
+    req.method === 'DELETE' && /^\/api\/wallets\/[^/]+$/.test(req.path);
+
+// 1. Global limiter: 200 req / 15 min per authenticated user or IP
+const globalLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: getRateLimitKey,
+    skip: isWalletDeleteRequest,
+    handler: (_req, res) => {
+        res.status(429).json({
+            error: 'Too many requests',
+            retryAfter: Math.ceil(15 * 60),
+        });
+    },
+});
+
+// 2. Auth limiter: 20 req / 15 min per IP (login / register brute-force protection)
+const authLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (_req, res) => {
+        res.status(429).json({
+            error: 'Too many requests',
+            retryAfter: Math.ceil(15 * 60),
+        });
+    },
+});
+
+// 3. Sync limiter: 5 req / 5 min per IP (expensive on-chain sync calls)
+const syncLimiter = rateLimit({
+    windowMs: 5 * 60 * 1000,
+    max: 5,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: (_req, res) => {
+        res.status(429).json({
+            error: 'Too many requests',
+            retryAfter: Math.ceil(5 * 60),
+        });
+    },
+});
 
 // Health check (excluded from rate limiting)
 app.get('/health', async (req: Request, res: Response) => {
@@ -74,6 +140,9 @@ app.get('/health', async (req: Request, res: Response) => {
     });
 });
 
+// Apply global limiter to all API routes after health check
+app.use(globalLimiter);
+
 // Rate limit stats endpoint disabled
 // app.get('/admin/rate-limits', async (req: Request, res: Response) => {
 //     try {
@@ -84,19 +153,33 @@ app.get('/health', async (req: Request, res: Response) => {
 //     }
 // });
 
-// Routes - NO RATE LIMITING
-app.use('/api/auth', authRoutes);
+// Routes
+app.use('/api/auth', authLimiter, authRoutes);          // auth limiter (20 req/15 min)
 app.use('/api/wallets', walletRoutes);
+app.use('/api', coindcxPortfolioRoutes);
 app.use('/api/portfolio', portfolioRoutes);
 app.use('/api/transactions', transactionRoutes);
+app.post('/api/sync/transactions', syncLimiter, authenticate, syncTransactions);
 app.use('/api/pnl', pnlRoutes);
 app.use('/api/forecasting', forecastingRoutes);
 app.use('/api/exchange', exchangeRoutes);
 
 // Error handling
-app.use((err: Error, req: Request, res: Response, next: any) => {
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
     console.error('Error:', err);
-    res.status(500).json({ error: 'Internal server error' });
+
+    // Preserve 4xx status codes thrown by route handlers; default everything else to 500
+    const status = (err as any).status;
+    const httpStatus = typeof status === 'number' && status >= 400 && status < 500
+        ? status
+        : 500;
+
+    // Expose error details only in development — never leak stack traces in production
+    const message = process.env.NODE_ENV === 'development'
+        ? err.message
+        : 'Internal server error';
+
+    res.status(httpStatus).json({ error: message });
 });
 
 // Start server
@@ -142,6 +225,7 @@ startServer();
 process.on('SIGTERM', async () => {
     console.log('SIGTERM received, shutting down gracefully...');
     stopSnapshotScheduler();
+    portfolioLiveService.stop();
     await prisma.$disconnect();
     await redis.disconnect();
     process.exit(0);
