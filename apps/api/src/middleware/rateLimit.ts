@@ -1,4 +1,4 @@
-import rateLimit, { Store } from 'express-rate-limit';
+import rateLimit, { Store, ipKeyGenerator } from 'express-rate-limit';
 import { Request, Response } from 'express';
 import redis from '../utils/redis';
 
@@ -127,8 +127,9 @@ export const createPerUserRateLimit = (maxRequests: number, windowMs: number) =>
             if (req.userId) {
                 return `user:${req.userId}`;
             }
-            // Use simple string for unauthenticated to avoid IPv6 validation error
-            return 'unauthenticated-user';
+            // Use ipKeyGenerator for proper IPv6 handling
+            const ip = req.ip || req.socket.remoteAddress || 'unknown';
+            return `unauthenticated:${ipKeyGenerator(ip)}`;
         },
         message: {
             error: 'Too many requests for your account, please try again later.',
@@ -175,8 +176,9 @@ export const createDynamicRateLimit = (getUserTier: (userId: string) => 'free' |
             if (req.userId) {
                 return `dynamic:user:${req.userId}`;
             }
-            // For unauthenticated, skip custom key (let default handle it)
-            return 'unauthenticated-user';
+            // Use ipKeyGenerator for proper IPv6 handling
+            const ip = req.ip || req.socket.remoteAddress || 'unknown';
+            return `unauthenticated:${ipKeyGenerator(ip)}`;
         },
         message: {
             error: 'Rate limit exceeded for your account tier.',

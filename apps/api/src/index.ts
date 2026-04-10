@@ -14,7 +14,7 @@ import forecastingRoutes from './routes/forecasting.routes';
 import exchangeRoutes from './routes/exchange.routes';
 import { authenticate } from './middleware/auth';
 import { syncTransactions } from './controllers/sync.controller';
-import rateLimit from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import { startSnapshotScheduler, stopSnapshotScheduler } from './services/snapshot.service';
 import { portfolioLiveService } from './services/portfolioLive.service';
 
@@ -51,7 +51,9 @@ const getRateLimitKey = (req: Request): string => {
         return `user:${clerkUserId}`;
     }
 
-    return `ip:${req.ip || req.socket.remoteAddress || 'unknown'}`;
+    // Use ipKeyGenerator helper for proper IPv6 handling
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
+    return `ip:${ipKeyGenerator(ip)}`;
 };
 
 const isWalletDeleteRequest = (req: Request): boolean =>
